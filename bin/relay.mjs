@@ -14,6 +14,7 @@
 import { readFileSync, existsSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join, extname } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { spawn } from 'node:child_process';
 import { loadConfig, configPath, relayDir, armedDir, sessionKey } from '../lib/relay-lib.mjs';
 
 const PER_POLL_CAP = 50; // server caps at 55; leave margin
@@ -23,7 +24,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // Returns { _: positionals, flags: {...} }. Repeatable flags (image/button/link) collect
 // into arrays. `--flag=value`, `--flag value`, and bare booleans all supported.
 const REPEATABLE = new Set(['image', 'button', 'link']);
-const BOOLEANS = new Set(['body-stdin', 'copy-stdin', 'high', 'push', 'no-push']);
+const BOOLEANS = new Set(['body-stdin', 'copy-stdin', 'high', 'push', 'no-push', 'open', 'no-open']);
 
 function parseArgs(argv) {
   const _ = [];
@@ -112,6 +113,77 @@ export function parseLinkSpec(spec) {
   const value = spec.slice(eq + 1).trim();
   if (!/^https?:\/\//i.test(value)) throw new Error(`--link url must be http(s): "${value}"`);
   return { id: 'link-' + label.toLowerCase().replace(/[^a-z0-9]+/g, '-'), label, behavior: 'link', value };
+}
+
+// --- draft template (exported for tests) -----------------------------------
+// `relay draft` is the first Relay "template": a rich, WYSIWYG-editable message card the
+// browser auto-opens to. buildDraftPayload is PURE (no fs/network) so it's unit-testable;
+// cmdDraft pre-reads stdin/image assets and passes them in.
+//
+// v1 drafts take LINK buttons only. Respond buttons are deliberately rejected: they would
+// collide with the editor's intrinsic copy toolbar and a respond-click's `card-updated` SSE
+// would rebuild the card from the ORIGINAL body, wiping in-progress edits.
+export function buildDraftPayload(flags, { stdin = '', cwd = '', host = null, assets = [] } = {}) {
+  const title = typeof flags.title === 'string' ? flags.title : null;
+  if (!title) throw new Error('relay draft: --title is required');
+  let body = typeof flags.body === 'string' ? flags.body : null;
+  if (flags['body-stdin']) body = stdin;
+  if (flags.button) throw new Error('relay draft: respond buttons (--button) are not supported on drafts in v1 — use --link for links');
+  const buttons = [];
+  for (const spec of flags.link || []) buttons.push(parseLinkSpec(spec));
+  return {
+    kind: 'draft',
+    title,
+    body,
+    source: { cwd, host, editable: true },
+    buttons,
+    priority: flags.high ? 'high' : 'normal',
+    push: flags.push ? true : false, // auto-open makes a push to the same box redundant; --push opts in
+    ...(assets.length ? { assets } : {}),
+  };
+}
+
+// win32 `cmd /c start` re-parses its own command line and treats &, ^, | specially even when
+// args are passed as an array — so validate the WHOLE assembled URL (not just the hex card id)
+// before handing it to cmd.exe. Our card path /?card=<hex16> is always safe; this guards against
+// a `cfg.url` containing shell-special characters.
+const WIN_URL_SAFE = /^https?:\/\/[^\s"&^|<>]+$/;
+export function browserOpenCommand(platform, url) {
+  if (platform === 'win32') {
+    if (!WIN_URL_SAFE.test(url)) throw new Error(`relay: refusing to open unsafe URL on win32: ${url}`);
+    return { cmd: 'cmd', args: ['/c', 'start', '', url] };
+  }
+  if (platform === 'darwin') return { cmd: 'open', args: [url] };
+  return { cmd: 'xdg-open', args: [url] };
+}
+
+export function isSameOrigin(url, cfgUrl) {
+  try {
+    return new URL(url).origin === new URL(cfgUrl).origin;
+  } catch {
+    return false;
+  }
+}
+
+// Fire-and-forget open of the default browser. NEVER throws or blocks: a headless/SSH/no-DISPLAY
+// box (or an unsafe URL) just means no window — `relay draft` must still succeed. Returns whether
+// a spawn was attempted (for the caller's log line / tests).
+function openInBrowser(url, cfgUrl) {
+  if (!isSameOrigin(url, cfgUrl)) return false;
+  let spec;
+  try {
+    spec = browserOpenCommand(process.platform, url);
+  } catch {
+    return false;
+  }
+  try {
+    const child = spawn(spec.cmd, spec.args, { detached: true, stdio: 'ignore' });
+    child.on('error', () => {});
+    child.unref();
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function verdictExit(verdict) {
@@ -280,6 +352,47 @@ async function cmdCard(cfg, flags) {
   process.exit(3);
 }
 
+async function cmdDraft(cfg, flags) {
+  const stdin = flags['body-stdin'] ? (await readStdin()).replace(/\s+$/, '') : '';
+  const assets = [];
+  for (const p of flags.image || []) {
+    const buf = readFileSync(p);
+    const mime = MIME[extname(p).toLowerCase()] || 'application/octet-stream';
+    assets.push({ mime, data: buf.toString('base64') });
+  }
+  const host = process.env.COMPUTERNAME || process.env.HOSTNAME || null;
+
+  let payload;
+  try {
+    payload = buildDraftPayload(flags, { stdin, cwd: process.cwd(), host, assets });
+  } catch (e) {
+    die(e.message);
+  }
+
+  let res;
+  try {
+    res = await fetch(`${cfg.url}/api/cards`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-write-token': cfg.writeToken },
+      body: JSON.stringify(payload),
+    });
+  } catch (e) {
+    die('relay draft: network error: ' + e.message);
+  }
+  if (!res.ok) die(`relay draft: HTTP ${res.status}: ${await res.text()}`);
+  const created = await res.json();
+
+  const absUrl = cfg.url + (created.url || '/?card=' + created.id);
+  process.stdout.write(JSON.stringify({ id: created.id, url: absUrl }) + '\n');
+
+  const open = flags['no-open'] ? false : true; // default open; --no-open suppresses
+  if (open && openInBrowser(absUrl, cfg.url)) {
+    process.stderr.write(`relay: opened ${absUrl}\n`);
+  } else {
+    process.stderr.write(`relay: draft ${created.id} ready — ${absUrl}\n`);
+  }
+}
+
 async function cmdPoll(cfg, args) {
   const id = args._[0];
   if (!id) die('usage: relay poll <cardId> [--wait=SECS]');
@@ -321,6 +434,8 @@ async function main() {
       return cmdNotify(requireConfig(), args.flags);
     case 'card':
       return cmdCard(requireConfig(), args.flags);
+    case 'draft':
+      return cmdDraft(requireConfig(), args.flags);
     case 'poll':
       return cmdPoll(requireConfig(), args);
     case 'arm':
@@ -338,6 +453,8 @@ async function main() {
           '  relay card --title T [--body B|--body-stdin] [--kind K] [--image PATH]...\n' +
           '             [--mermaid FILE|-] [--button "Label=action[:style]"]... [--link "Label=url"]...\n' +
           '             [--copy TEXT|--copy-stdin] [--no-push] [--high] [--wait[=SECS]]\n' +
+          '  relay draft --title T [--body B|--body-stdin] [--image PATH]... [--link "Label=url"]...\n' +
+          '             [--push] [--no-open] [--high]   # rich WYSIWYG-editable message card; opens your browser\n' +
           '  relay poll <cardId> [--wait=SECS]\n' +
           '  relay arm "<label>" | relay disarm\n\n' +
           'wait/poll exit codes: 0=approved 20=changes_requested 1=other 3=timeout\n',

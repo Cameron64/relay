@@ -8,7 +8,7 @@
 // BUMP CACHE_VERSION on EVERY change to a precached asset (app.js / app.css / vendor files),
 // not just the first time one is added — otherwise clients keep stale JS until the old
 // worker dies. Mermaid is deliberately NOT precached (large, lazy-loaded by app.js on demand).
-const CACHE_VERSION = 'relay-v2';
+const CACHE_VERSION = 'relay-v3';
 const PRECACHE = [
   '/',
   '/offline.html',

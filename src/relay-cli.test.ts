@@ -2,7 +2,7 @@
 // main() does not run on import).
 import { test, expect, describe } from 'bun:test';
 // @ts-ignore — zero-dep .mjs CLI has no .d.ts; the parsers are plain functions.
-import { parseButtonSpec, parseLinkSpec } from '../bin/relay.mjs';
+import { parseButtonSpec, parseLinkSpec, buildDraftPayload, browserOpenCommand, isSameOrigin } from '../bin/relay.mjs';
 
 describe('parseButtonSpec', () => {
   test('Label=action -> respond button with behavior field', () => {
@@ -45,5 +45,73 @@ describe('parseLinkSpec', () => {
   });
   test('rejects non-http url', () => {
     expect(() => parseLinkSpec('Bad=javascript:alert(1)')).toThrow();
+  });
+});
+
+describe('buildDraftPayload', () => {
+  test('builds an editable draft card with source.editable and retained cwd/host', () => {
+    const p = buildDraftPayload({ title: 'Msg to team', body: '## hi' }, { cwd: '/work', host: 'BOX' });
+    expect(p.kind).toBe('draft');
+    expect(p.title).toBe('Msg to team');
+    expect(p.body).toBe('## hi');
+    expect(p.source).toEqual({ cwd: '/work', host: 'BOX', editable: true });
+  });
+  test('defaults push to false; --push opts in', () => {
+    expect(buildDraftPayload({ title: 'T' }, {}).push).toBe(false);
+    expect(buildDraftPayload({ title: 'T', push: true }, {}).push).toBe(true);
+  });
+  test('--body-stdin uses the piped stdin as the body', () => {
+    const p = buildDraftPayload({ title: 'T', 'body-stdin': true }, { stdin: 'piped body' });
+    expect(p.body).toBe('piped body');
+  });
+  test('throws without a title', () => {
+    expect(() => buildDraftPayload({}, {})).toThrow(/title/);
+  });
+  test('accepts --link buttons but rejects respond --button (v1)', () => {
+    const p = buildDraftPayload({ title: 'T', link: ['Open=https://example.com'] }, {});
+    expect(p.buttons).toHaveLength(1);
+    expect(p.buttons[0].behavior).toBe('link');
+    expect(() => buildDraftPayload({ title: 'T', button: ['Send=approved'] }, {})).toThrow(/respond/);
+  });
+  test('passes through pre-read image assets', () => {
+    const p = buildDraftPayload({ title: 'T' }, { assets: [{ mime: 'image/png', data: 'AAAA' }] });
+    expect(p.assets).toHaveLength(1);
+    expect(p.assets[0].mime).toBe('image/png');
+  });
+  test('high priority flag', () => {
+    expect(buildDraftPayload({ title: 'T', high: true }, {}).priority).toBe('high');
+    expect(buildDraftPayload({ title: 'T' }, {}).priority).toBe('normal');
+  });
+});
+
+describe('browserOpenCommand', () => {
+  test('win32 wraps cmd /c start with an empty title arg', () => {
+    const c = browserOpenCommand('win32', 'https://relay.example.app/?card=00aabb11ccdd2233');
+    expect(c.cmd).toBe('cmd');
+    expect(c.args).toEqual(['/c', 'start', '', 'https://relay.example.app/?card=00aabb11ccdd2233']);
+  });
+  test('win32 allows a URL with a ?query= card id', () => {
+    expect(() => browserOpenCommand('win32', 'https://h.app/?card=abcd1234abcd1234')).not.toThrow();
+  });
+  test('win32 rejects a URL containing cmd-special & / ^ / | characters', () => {
+    expect(() => browserOpenCommand('win32', 'https://h.app/?a=1&b=2')).toThrow();
+    expect(() => browserOpenCommand('win32', 'https://h.app/?x=^foo')).toThrow();
+  });
+  test('darwin uses open, linux uses xdg-open', () => {
+    expect(browserOpenCommand('darwin', 'https://h.app/?card=x')).toEqual({ cmd: 'open', args: ['https://h.app/?card=x'] });
+    expect(browserOpenCommand('linux', 'https://h.app/?card=x')).toEqual({ cmd: 'xdg-open', args: ['https://h.app/?card=x'] });
+  });
+});
+
+describe('isSameOrigin (auto-open safety gate)', () => {
+  const cfg = 'https://relay-production-6ebb.up.railway.app';
+  test('assembled card URL matches the configured origin', () => {
+    expect(isSameOrigin(cfg + '/?card=00aabb11ccdd2233', cfg)).toBe(true);
+  });
+  test('a different origin is rejected', () => {
+    expect(isSameOrigin('https://evil.example.com/?card=x', cfg)).toBe(false);
+  });
+  test('garbage URL is rejected, not thrown', () => {
+    expect(isSameOrigin('not a url', cfg)).toBe(false);
   });
 });

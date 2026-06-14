@@ -69,6 +69,8 @@ relay card  --title T [--body B|--body-stdin] [--kind note|approval|draft|diagra
             [--image PATH]... [--mermaid FILE|-]
             [--button "Label=action[:style]"]... [--link "Label=https://url"]...
             [--copy TEXT|--copy-stdin] [--no-push] [--high] [--wait[=SECS]]
+relay draft --title T [--body B|--body-stdin] [--image PATH]... [--link "Label=url"]...
+            [--push] [--no-open] [--high]              # rich WYSIWYG-editable message card
 relay poll  <cardId> [--wait=SECS]                     # re-poll an existing card's verdict
 relay arm "<label>" | relay disarm                    # arm/clear the Stop-hook "done" ping
 ```
@@ -82,6 +84,34 @@ does ONE bounded long-poll (≤50s). If you don't answer in time it exits **3** 
 card id; Claude then re-issues `relay poll <id> --wait=50` in a fresh call, repeating until you
 respond. Arbitrarily long deliberation, every call within the limit. The verdict is persisted
 server-side, so a re-poll always reads the final answer.
+
+## Templates
+
+Templates are one-line `relay` subcommands that wrap a card with the right defaults for a
+recurring use case. The first one:
+
+### `relay draft` — hand me a message you've drafted
+
+When Claude has written a message for you to send (Teams / Slack / Bitbucket / email), the
+terminal can't show rich text. `relay draft` pushes it as a **WYSIWYG-editable** card and
+**auto-opens your browser** straight to it. You edit in place, then:
+
+- **Copy formatted** — rich HTML (`text/html` + `text/plain`); pastes *with* formatting into
+  Teams/Slack/Outlook.
+- **Copy plain** — the visible text only.
+- **Copy image** — any attached picture (normalized to PNG for the clipboard).
+
+```bash
+# pipe markdown straight from Claude:
+printf '## Ship update\n- [x] deployed\n- [ ] verify\n\n**thanks!**' \
+  | relay draft --title "Message for #team" --body-stdin
+# → creates the card, opens your default browser to it, ready to edit + copy
+```
+
+Defaults: `push:false` (the browser already opened on this box) — pass `--push` to also ping
+your phone; auto-open is on — pass `--no-open` for automation/headless callers. Edits are
+client-side only (copy is the action; nothing is saved back). Respond buttons aren't supported on
+drafts in v1; `--link` adds plain link buttons.
 
 ## Claude Code hooks
 

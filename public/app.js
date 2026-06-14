@@ -25,6 +25,16 @@ let sseConnectedOnce = false;
 let mermaidPromise = null;
 
 const focusCardId = new URLSearchParams(location.search).get('card');
+let focusHandled = false;
+
+// Id of the editable-draft card currently being edited. The SSE refresh path checks this so an
+// incoming card-updated/backfill can't rebuild (and wipe) the editor the user is typing in.
+let activeDraftEditId = null;
+
+// Tags kept when copying the editor's rich HTML to the clipboard. Deliberately a SMALL semantic
+// allowlist (no style/class) so the result pastes cleanly into Teams/Slack/Outlook, which ignore
+// page CSS and strip unknown attributes. Separate from the in-page display sanitize.
+const CLIPBOARD_ALLOWED_TAGS = ['b', 'strong', 'i', 'em', 'u', 'a', 'ul', 'ol', 'li', 'p', 'br', 'h1', 'h2', 'h3', 'code', 'pre', 'blockquote'];
 
 // --- helpers ---------------------------------------------------------------
 function api(path, opts = {}) {
@@ -111,8 +121,10 @@ function buildCard(card) {
   const body = document.createElement('div');
   body.className = 'card-body';
 
-  // images
-  if (card.assets && card.assets.length) {
+  const isEditableDraft = card.kind === 'draft' && card.source && card.source.editable;
+
+  // images — the editable-draft template renders its own images (each with a Copy image button)
+  if (!isEditableDraft && card.assets && card.assets.length) {
     const wrap = document.createElement('div');
     wrap.className = 'assets';
     for (const a of card.assets) {
@@ -125,8 +137,11 @@ function buildCard(card) {
     body.appendChild(wrap);
   }
 
-  // draft = monospace block (copyable)
-  if (card.kind === 'draft' && card.body) {
+  if (isEditableDraft) {
+    // the `relay draft` template — WYSIWYG editor + copy toolbar (incl. its own images)
+    buildEditableDraft(card, body);
+  } else if (card.kind === 'draft' && card.body) {
+    // plain draft = read-only monospace block (copyable)
     const pre = document.createElement('div');
     pre.className = 'draft';
     pre.textContent = card.body;
@@ -300,15 +315,150 @@ async function copyText(text) {
   }
 }
 
+// --- editable rich draft (the `relay draft` template) ----------------------
+function buildEditableDraft(card, body) {
+  // images first, each with its own (uniquely-named) Copy image button
+  if (card.assets && card.assets.length) {
+    const wrap = document.createElement('div');
+    wrap.className = 'assets';
+    card.assets.forEach((a, i) => {
+      const fig = document.createElement('div');
+      fig.className = 'asset-fig';
+      const img = document.createElement('img');
+      img.loading = 'lazy';
+      img.alt = card.title;
+      const assetUrl = '/api/cards/' + card.id + '/asset/' + a.id;
+      img.src = assetUrl;
+      const copyImg = document.createElement('button');
+      copyImg.className = 'outline';
+      copyImg.textContent = 'Copy image';
+      copyImg.setAttribute('aria-label', 'Copy image ' + (i + 1)); // disambiguate N buttons
+      copyImg.addEventListener('click', () => copyImage(assetUrl));
+      fig.append(img, copyImg);
+      wrap.appendChild(fig);
+    });
+    body.appendChild(wrap);
+  }
+
+  // WYSIWYG editor seeded with sanitized markdown — Cam edits the rendered view directly
+  const editor = document.createElement('div');
+  editor.className = 'editable-draft';
+  editor.contentEditable = 'true';
+  editor.setAttribute('role', 'textbox');
+  editor.setAttribute('aria-multiline', 'true');
+  editor.setAttribute('aria-label', 'Editable draft message');
+  editor.innerHTML = renderMarkdown(card.body || '');
+
+  editor.addEventListener('focus', () => {
+    activeDraftEditId = card.id;
+  });
+  editor.addEventListener('input', () => {
+    activeDraftEditId = card.id;
+    editor.dataset.dirty = '1';
+  });
+  editor.addEventListener('blur', () => {
+    if (!editor.dataset.dirty) activeDraftEditId = null;
+  });
+  // sanitize pasted HTML so the editor can't accumulate unsafe/dirty markup
+  editor.addEventListener('paste', (e) => {
+    e.preventDefault();
+    const cd = e.clipboardData || window.clipboardData;
+    const html = cd ? cd.getData('text/html') : '';
+    const text = cd ? cd.getData('text/plain') : '';
+    let insert;
+    if (html) insert = window.DOMPurify ? window.DOMPurify.sanitize(html) : escapeText(text);
+    else insert = escapeText(text).replace(/\n/g, '<br>');
+    document.execCommand('insertHTML', false, insert);
+    activeDraftEditId = card.id;
+    editor.dataset.dirty = '1';
+  });
+  body.appendChild(editor);
+
+  // toolbar: Copy formatted (rich) / Copy plain (reuses copyText)
+  const bar = document.createElement('div');
+  bar.className = 'draft-toolbar';
+  const fmt = document.createElement('button');
+  fmt.className = 'secondary';
+  fmt.textContent = 'Copy formatted';
+  fmt.addEventListener('click', () => copyRich(editor.innerHTML, editor.innerText));
+  const plain = document.createElement('button');
+  plain.className = 'outline';
+  plain.textContent = 'Copy plain';
+  plain.addEventListener('click', () => copyText(editor.innerText));
+  bar.append(fmt, plain);
+  body.appendChild(bar);
+}
+
+// Copy rich HTML (+ plain fallback) to the clipboard. Sanitized to a small semantic allowlist so
+// it pastes cleanly into Teams/Slack/Outlook. Falls back to plain text if ClipboardItem is absent.
+async function copyRich(html, text) {
+  const clean = window.DOMPurify
+    ? window.DOMPurify.sanitize(html, { ALLOWED_TAGS: CLIPBOARD_ALLOWED_TAGS, ALLOWED_ATTR: ['href'] })
+    : escapeText(text);
+  try {
+    if (navigator.clipboard && window.ClipboardItem && window.isSecureContext) {
+      const item = new ClipboardItem({
+        'text/html': new Blob([clean], { type: 'text/html' }),
+        'text/plain': new Blob([text], { type: 'text/plain' }),
+      });
+      await navigator.clipboard.write([item]);
+      toast('Copied formatted');
+      return;
+    }
+  } catch {
+    // fall through to plain
+  }
+  copyText(text);
+}
+
+// Copy an attached image to the clipboard, normalized to PNG (the only format browsers reliably
+// accept). Safari keeps the user gesture only if the ClipboardItem value is a Promise of the blob.
+async function copyImage(assetUrl) {
+  try {
+    if (!(navigator.clipboard && window.ClipboardItem && window.isSecureContext)) throw new Error('no clipboard');
+    const pngPromise = (async () => {
+      const resp = await fetch(assetUrl, { credentials: 'include' });
+      const blob = await resp.blob();
+      if (blob.type === 'image/png') return blob;
+      const bmp = await createImageBitmap(blob);
+      const canvas = document.createElement('canvas');
+      canvas.width = bmp.width;
+      canvas.height = bmp.height;
+      canvas.getContext('2d').drawImage(bmp, 0, 0);
+      return await new Promise((res) => canvas.toBlob(res, 'image/png'));
+    })();
+    await navigator.clipboard.write([new ClipboardItem({ 'image/png': pngPromise })]);
+    toast('Image copied');
+  } catch {
+    toast('Couldn’t copy image — long-press to copy');
+  }
+}
+
+// Scroll/flash (and, for an editable draft, focus the editor) the card named by ?card=, no matter
+// whether it arrived via the initial feed render or an SSE card-created event. Fires once.
+function maybeFocusDraft(el, id) {
+  if (focusHandled || !focusCardId || id !== focusCardId || !el) return;
+  focusHandled = true;
+  el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  el.classList.add('flash');
+  const ed = el.querySelector('.editable-draft');
+  if (ed) setTimeout(() => { try { ed.focus(); } catch {} }, 300);
+}
+
 // --- feed management -------------------------------------------------------
 function upsertCard(card, { flash = false } = {}) {
-  const existing = cardsById.get(card.id);
   cardsById.set(card.id, card);
   if (card.created_at && (!newestCursor || card.created_at > newestCursor)) newestCursor = card.created_at;
 
+  const old = feedEl.querySelector('.card[data-id="' + cssEscape(card.id) + '"]');
+
+  // Per-card edit guard: if THIS card's editable draft is being edited, keep the live editor —
+  // rebuilding from the (original) server body would wipe in-progress edits. Scoped to this exact
+  // card id, so every other card/kind still refreshes normally.
+  if (old && activeDraftEditId === card.id) return old;
+
   const built = buildCard(card);
   if (flash) built.classList.add('flash');
-  const old = feedEl.querySelector('.card[data-id="' + cssEscape(card.id) + '"]');
   if (old) {
     old.replaceWith(built);
   } else {
@@ -318,19 +468,15 @@ function upsertCard(card, { flash = false } = {}) {
     else feedEl.appendChild(built);
   }
   emptyEl.classList.toggle('hidden', cardsById.size > 0);
+  maybeFocusDraft(built, card.id);
   return built;
 }
 
 function renderAll(cards) {
+  // upsertCard fires maybeFocusDraft per card, so ?card= focus/scroll works on both the initial
+  // render and SSE arrival — no separate focus block needed here.
   for (const c of cards.slice().reverse()) upsertCard(c);
   emptyEl.classList.toggle('hidden', cardsById.size > 0);
-  if (focusCardId) {
-    const el = feedEl.querySelector('.card[data-id="' + cssEscape(focusCardId) + '"]');
-    if (el) {
-      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      el.classList.add('flash');
-    }
-  }
 }
 
 async function loadFeed() {
