@@ -1,0 +1,11 @@
+# Railway deploy config. RAILPACK auto-detects Bun and runs `bun install`, then the
+# startCommand below. Healthcheck is DB-free so a storage hiccup never restart-loops.
+[build]
+builder = "RAILPACK"
+
+[deploy]
+startCommand = "bun run src/server.ts"
+healthcheckPath = "/api/health"
+healthcheckTimeout = 300
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 3
