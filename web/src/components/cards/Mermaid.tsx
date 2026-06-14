@@ -15,7 +15,16 @@ export function Mermaid({ code }: { code: string }) {
     (async () => {
       try {
         const mermaid = (await import('mermaid')).default;
-        mermaid.initialize({ securityLevel: 'strict', startOnLoad: false, theme: 'default' });
+        // theme:'dark' gives light text + edge strokes that are visible on Relay's dark card.
+        // htmlLabels:false renders labels as SVG <text> instead of <foreignObject> HTML — the
+        // foreignObject would otherwise be stripped by the SVG-only DOMPurify pass below, leaving
+        // empty boxes with no labels.
+        mermaid.initialize({
+          securityLevel: 'strict',
+          startOnLoad: false,
+          theme: 'dark',
+          flowchart: { htmlLabels: false },
+        });
         const id = 'mmd-' + crypto.randomUUID();
         const { svg: rendered } = await mermaid.render(id, code);
         const clean = DOMPurify.sanitize(rendered, { USE_PROFILES: { svg: true, svgFilters: true } });
