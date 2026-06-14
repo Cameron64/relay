@@ -101,14 +101,18 @@ relay notify [--title T] [--body B] [--url U]          # body from stdin if pipe
 relay card  --title T [--body B|--body-stdin] [--kind note|approval|draft|diagram|image|choice]
             [--image PATH]... [--mermaid FILE|-]
             [--button "Label=action[:style]"]... [--link "Label=https://url"]...
-            [--copy TEXT|--copy-stdin] [--no-push] [--high] [--wait[=SECS]]
+            [--copy TEXT|--copy-stdin] [--open] [--no-push] [--high] [--wait[=SECS]]
+            # --open auto-opens this desktop's browser to the card (powers the /show skill)
 relay draft --title T [--body B|--body-stdin] [--image PATH]... [--link "Label=url"]...
             [--push] [--no-open] [--high]              # rich WYSIWYG-editable message card
 relay poll  <cardId> [--wait=SECS]                     # re-poll an existing card's verdict
 relay arm "<label>" | relay disarm                    # arm/clear the Stop-hook "done" ping
+relay afk   [on [--reason R] | off | status]           # away-from-keyboard flag (~/.relay/afk.json)
 ```
 
 `--wait` / `poll` exit codes: **0**=approved · **20**=changes_requested · **1**=other/dismissed · **3**=timeout.
+`relay afk status` exit codes: **0**=at desk · **10**=AFK (the command itself never fails; the code
+encodes state). The `/show`, `/draft`, and `/afk` Claude Code skills wrap these for everyday use.
 
 ### Bounded-poll pattern (waiting for a human without tripping the harness)
 

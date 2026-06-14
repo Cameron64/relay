@@ -15,7 +15,7 @@ import { readFileSync, existsSync, mkdirSync, writeFileSync, rmSync } from 'node
 import { join, extname } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { spawn } from 'node:child_process';
-import { loadConfig, configPath, relayDir, armedDir, sessionKey } from '../lib/relay-lib.mjs';
+import { loadConfig, configPath, relayDir, armedDir, sessionKey, afkPath, readAfk } from '../lib/relay-lib.mjs';
 
 const PER_POLL_CAP = 50; // server caps at 55; leave margin
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -338,6 +338,15 @@ async function cmdCard(cfg, flags) {
   if (!res.ok) die(`relay card: HTTP ${res.status}: ${await res.text()}`);
   const created = await res.json();
 
+  // --open: auto-open the desktop browser to the card (what /show uses). Assemble the ABSOLUTE
+  // url the same way cmdDraft does — created.url is relative ("/?card=<hex16>"), and isSameOrigin
+  // (inside openInBrowser) rejects a relative url, silently opening nothing. Runs before either
+  // exit branch so it fires for both the no-wait (default) and --wait cases.
+  if (flags.open) {
+    const absUrl = cfg.url + (created.url || '/?card=' + created.id);
+    if (openInBrowser(absUrl, cfg.url)) process.stderr.write(`relay: opened ${absUrl}\n`);
+  }
+
   if (flags.wait === undefined) {
     process.stdout.write(JSON.stringify({ id: created.id, url: created.url }) + '\n');
     process.stderr.write(`relay: card ${created.id} created\n`);
@@ -421,6 +430,37 @@ function cmdDisarm() {
   process.stderr.write(`relay: disarmed (${key}).\n`);
 }
 
+// `relay afk` — the away-from-keyboard flag (~/.relay/afk.json). Local state only (NO config
+// needed, like arm/disarm): `on` writes the flag, `off`/`back`/`done`/`here` clears it, and the
+// default `status` prints {afk:bool,...} and exits 10 when AFK / 0 when at the desk so a caller can
+// branch on the exit code (`relay afk status >/dev/null; AFK=$?`). Other sessions consult this via
+// the /relay + /show skills to decide whether to push to the phone instead of opening the desktop.
+function cmdAfk(args) {
+  const sub = (args._[0] || 'status').toLowerCase();
+  if (sub === 'on' || sub === 'start') {
+    const reason =
+      (typeof args.flags.reason === 'string' ? args.flags.reason : args._.slice(1).join(' ').trim()) || null;
+    mkdirSync(relayDir(), { recursive: true });
+    const rec = { since: new Date().toISOString(), reason, host: process.env.COMPUTERNAME || process.env.HOSTNAME || null };
+    writeFileSync(afkPath(), JSON.stringify(rec, null, 2) + '\n');
+    process.stdout.write(JSON.stringify({ afk: true, ...rec }) + '\n');
+    process.stderr.write(`relay: AFK on${reason ? ' — ' + reason : ''}\n`);
+    return;
+  }
+  if (sub === 'off' || sub === 'back' || sub === 'done' || sub === 'here') {
+    try {
+      rmSync(afkPath());
+    } catch {}
+    process.stdout.write(JSON.stringify({ afk: false }) + '\n');
+    process.stderr.write('relay: AFK off — welcome back\n');
+    return;
+  }
+  // status (default / bare `relay afk`)
+  const rec = readAfk();
+  process.stdout.write(JSON.stringify(rec ? { afk: true, ...rec } : { afk: false }) + '\n');
+  process.exit(rec ? 10 : 0);
+}
+
 // --- main ------------------------------------------------------------------
 async function main() {
   const argv = process.argv.slice(2);
@@ -442,6 +482,8 @@ async function main() {
       return cmdArm(args);
     case 'disarm':
       return cmdDisarm();
+    case 'afk':
+      return cmdAfk(args); // local state only — no requireConfig
     case undefined:
     case 'help':
     case '--help':
@@ -452,12 +494,15 @@ async function main() {
           '  relay notify [--title T] [--body B] [--url U]\n' +
           '  relay card --title T [--body B|--body-stdin] [--kind K] [--image PATH]...\n' +
           '             [--mermaid FILE|-] [--button "Label=action[:style]"]... [--link "Label=url"]...\n' +
-          '             [--copy TEXT|--copy-stdin] [--no-push] [--high] [--wait[=SECS]]\n' +
+          '             [--copy TEXT|--copy-stdin] [--open] [--no-push] [--high] [--wait[=SECS]]\n' +
+          '             # --open auto-opens this desktop\'s browser to the card (what /show uses)\n' +
           '  relay draft --title T [--body B|--body-stdin] [--image PATH]... [--link "Label=url"]...\n' +
           '             [--push] [--no-open] [--high]   # rich WYSIWYG-editable message card; opens your browser\n' +
           '  relay poll <cardId> [--wait=SECS]\n' +
-          '  relay arm "<label>" | relay disarm\n\n' +
-          'wait/poll exit codes: 0=approved 20=changes_requested 1=other 3=timeout\n',
+          '  relay arm "<label>" | relay disarm\n' +
+          '  relay afk [on [--reason R] | off | status]   # away-from-keyboard flag (~/.relay/afk.json)\n\n' +
+          'wait/poll exit codes: 0=approved 20=changes_requested 1=other 3=timeout\n' +
+          'afk status exit codes: 0=at desk  10=AFK\n',
       );
       return;
     default:

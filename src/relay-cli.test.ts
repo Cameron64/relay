@@ -1,8 +1,13 @@
 // Tests the CLI's pure spec parsers (imported from the .mjs; import.meta.main stays false so
 // main() does not run on import).
-import { test, expect, describe } from 'bun:test';
+import { test, expect, describe, beforeAll, afterAll } from 'bun:test';
+import os from 'node:os';
+import { join } from 'node:path';
+import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 // @ts-ignore — zero-dep .mjs CLI has no .d.ts; the parsers are plain functions.
 import { parseButtonSpec, parseLinkSpec, buildDraftPayload, browserOpenCommand, isSameOrigin } from '../bin/relay.mjs';
+// @ts-ignore — afk helpers live in the shared lib (read pure; the CLI does the writes).
+import { afkPath, readAfk } from '../lib/relay-lib.mjs';
 
 describe('parseButtonSpec', () => {
   test('Label=action -> respond button with behavior field', () => {
@@ -113,5 +118,53 @@ describe('isSameOrigin (auto-open safety gate)', () => {
   });
   test('garbage URL is rejected, not thrown', () => {
     expect(isSameOrigin('not a url', cfg)).toBe(false);
+  });
+});
+
+describe('readAfk / afkPath (the AFK flag)', () => {
+  // Isolate from the real ~/.relay by pointing the home dir at a temp dir. os.homedir() reads
+  // HOME (POSIX) / USERPROFILE (Windows) at call time, so afkPath()/readAfk() follow the override.
+  // The second test asserts the override actually took effect — if a runtime ever cached homedir,
+  // the fs-based tests below would silently read the real home, so we fail loudly instead.
+  const tmpHome = join(os.tmpdir(), 'relay-afk-test-' + process.pid);
+  const savedHome = process.env.HOME;
+  const savedUserprofile = process.env.USERPROFILE;
+
+  beforeAll(() => {
+    process.env.HOME = tmpHome;
+    process.env.USERPROFILE = tmpHome;
+    mkdirSync(join(tmpHome, '.relay'), { recursive: true });
+  });
+  afterAll(() => {
+    try {
+      rmSync(tmpHome, { recursive: true, force: true });
+    } catch {}
+    if (savedHome === undefined) delete process.env.HOME;
+    else process.env.HOME = savedHome;
+    if (savedUserprofile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = savedUserprofile;
+  });
+
+  test('afkPath() resolves to afk.json under the .relay dir', () => {
+    expect(afkPath()).toMatch(/[\\/]\.relay[\\/]afk\.json$/);
+  });
+  test('the temp-home override took effect (afkPath is under tmpHome)', () => {
+    expect(afkPath().startsWith(tmpHome)).toBe(true);
+  });
+  test('readAfk() returns null when no flag file exists', () => {
+    try {
+      rmSync(afkPath());
+    } catch {}
+    expect(readAfk()).toBeNull();
+  });
+  test('readAfk() returns the parsed record when the flag exists', () => {
+    writeFileSync(afkPath(), JSON.stringify({ since: '2026-06-14T00:00:00Z', reason: 'lunch' }));
+    const rec = readAfk();
+    expect(rec).not.toBeNull();
+    expect(rec.reason).toBe('lunch');
+  });
+  test('readAfk() returns null on malformed JSON (fail-safe = at desk)', () => {
+    writeFileSync(afkPath(), '{ this is not valid json');
+    expect(readAfk()).toBeNull();
   });
 });
