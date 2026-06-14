@@ -1,7 +1,10 @@
-# Railway deploy config. RAILPACK auto-detects Bun and runs `bun install`, then the
-# startCommand below. Healthcheck is DB-free so a storage hiccup never restart-loops.
+# Railway deploy config. RAILPACK auto-detects Bun and runs `bun install` (incl. devDependencies),
+# then buildCommand to build the React frontend into dist/, then startCommand to serve it.
+# Healthcheck is DB-free so a storage hiccup never restart-loops. If the build fails, dist/ is
+# absent and the server exits in production (NODE_ENV=production) — Railway keeps the prior deploy.
 [build]
 builder = "RAILPACK"
+buildCommand = "bun run build"
 
 [deploy]
 startCommand = "bun run src/server.ts"

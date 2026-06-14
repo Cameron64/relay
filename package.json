@@ -5,17 +5,56 @@
   "type": "module",
   "scripts": {
     "dev": "bun --watch run src/server.ts",
+    "dev:web": "vite",
     "start": "bun run src/server.ts",
+    "build": "vite build",
     "typecheck": "tsc --noEmit",
-    "test": "DB_PATH=:memory: bun test"
+    "typecheck:web": "tsc --noEmit -p web/tsconfig.json",
+    "test": "DB_PATH=:memory: bun test ./src/",
+    "test:web": "vitest run"
   },
   "dependencies": {
     "hono": "^4.6.0",
-    "web-push": "^3.6.7"
+    "web-push": "^3.6.7",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "@mantine/core": "^7.0.0",
+    "@mantine/hooks": "^7.0.0",
+    "@mantine/notifications": "^7.0.0",
+    "@mantine/tiptap": "^7.0.0",
+    "@tiptap/react": "^2.6.0",
+    "@tiptap/starter-kit": "^2.6.0",
+    "@tiptap/extension-link": "^2.6.0",
+    "@tiptap/extension-table": "^2.6.0",
+    "@tiptap/extension-table-row": "^2.6.0",
+    "@tiptap/extension-table-cell": "^2.6.0",
+    "@tiptap/extension-table-header": "^2.6.0",
+    "@tiptap/pm": "^2.6.0",
+    "react-markdown": "^9.0.0",
+    "remark-gfm": "^4.0.0",
+    "remark-breaks": "^4.0.0",
+    "rehype-sanitize": "^6.0.0",
+    "marked": "^14.0.0",
+    "dompurify": "^3.1.0",
+    "mermaid": "^11.0.0",
+    "zustand": "^5.0.0",
+    "vite": "^5.4.0",
+    "@vitejs/plugin-react": "^4.3.0",
+    "vite-plugin-pwa": "^0.20.0",
+    "workbox-precaching": "^7.1.0",
+    "workbox-routing": "^7.1.0",
+    "workbox-strategies": "^7.1.0",
+    "workbox-core": "^7.1.0"
   },
   "devDependencies": {
     "@types/bun": "latest",
     "@types/web-push": "^3.6.4",
-    "typescript": "^5.5.0"
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.1.0",
+    "@testing-library/react": "^16.0.0",
+    "@testing-library/jest-dom": "^6.5.0",
+    "jsdom": "^25.0.0"
   }
 }

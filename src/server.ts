@@ -1,5 +1,6 @@
 import { Hono } from 'hono';
 import { serveStatic } from 'hono/bun';
+import { existsSync } from 'node:fs';
 import { pushRoutes } from './routes-push.ts';
 import { appRoutes } from './routes-cards.ts';
 import { store } from './store.ts';
@@ -7,6 +8,20 @@ import { ensureCardsSchema } from './cards-store.ts';
 
 // Initialize the subscription store (idempotent, non-fatal — see store.ts).
 await store.ensureSchema();
+
+// The React frontend is built by Vite to ./dist (see vite.config.ts + `bun run build`). In
+// production the server serves that build. If the build is missing, FAIL FAST in production so
+// Railway marks the new deploy failed and keeps the previous (working) deploy live — rather than
+// serving an API with no frontend. In dev (NODE_ENV != production) we only warn: `bun run dev`
+// runs the backend alongside the Vite dev server (`bun run dev:web`), which serves the frontend.
+const DIST = './dist';
+if (!existsSync(`${DIST}/index.html`)) {
+  console.error(`[relay] ${DIST}/index.html not found — run \`bun run build\` to build the frontend.`);
+  if (process.env.NODE_ENV === 'production') {
+    console.error('[relay] refusing to start in production without a frontend build.');
+    process.exit(1);
+  }
+}
 
 const app = new Hono();
 
@@ -33,8 +48,10 @@ app.route('/api', appRoutes); // -> /api/unlock, /api/stream, /api/cards/*
 //   - no-cache so browsers always re-check for a new SW / manifest on reload
 //   - Service-Worker-Allowed: / lets the worker control the entire origin
 //   - the correct content-types (a SW served as text/html will not register)
+// The SW is emitted by vite-plugin-pwa to dist/service-worker.js — the SAME url existing clients
+// are registered against, so they upgrade in place.
 app.get('/service-worker.js', () =>
-  new Response(Bun.file('./public/service-worker.js'), {
+  new Response(Bun.file(`${DIST}/service-worker.js`), {
     headers: {
       'Content-Type': 'text/javascript; charset=utf-8',
       'Cache-Control': 'no-cache',
@@ -44,7 +61,7 @@ app.get('/service-worker.js', () =>
 );
 
 app.get('/manifest.webmanifest', () =>
-  new Response(Bun.file('./public/manifest.webmanifest'), {
+  new Response(Bun.file(`${DIST}/manifest.webmanifest`), {
     headers: {
       'Content-Type': 'application/manifest+json',
       'Cache-Control': 'no-cache',
@@ -54,13 +71,13 @@ app.get('/manifest.webmanifest', () =>
 
 // --- App shell + static assets ----------------------------------------------
 app.get('/', () =>
-  new Response(Bun.file('./public/index.html'), {
+  new Response(Bun.file(`${DIST}/index.html`), {
     headers: { 'Content-Type': 'text/html; charset=utf-8' },
   }),
 );
 
-// icons/, offline.html, push-client.js, app.js, app.css, vendor/, anything else under public/.
-app.get('*', serveStatic({ root: './public' }));
+// Hashed JS/CSS bundles, icons/, offline.html — everything else under the Vite build.
+app.get('*', serveStatic({ root: DIST }));
 
 const port = Number(process.env.PORT) || 3000;
 console.log(`[relay] listening on :${port}`);

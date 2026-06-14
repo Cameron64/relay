@@ -1,0 +1,58 @@
+:root {
+  color-scheme: light dark;
+}
+
+body {
+  margin: 0;
+}
+
+/* New-card / deep-link highlight — one-shot pulse around a card. */
+.relay-flash {
+  animation: relay-flash 1.2s ease-out;
+}
+@keyframes relay-flash {
+  0% {
+    box-shadow: 0 0 0 3px var(--mantine-color-indigo-5);
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+
+/* Plain (non-editable) draft — read-only monospace block, copyable. */
+.draft-plain {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.9rem;
+  line-height: 1.5;
+  background: var(--mantine-color-default-hover);
+  padding: 0.75rem 0.9rem;
+  border-radius: var(--mantine-radius-md);
+  overflow-x: auto;
+  margin: 0;
+}
+
+/* Rendered Mermaid diagram + its source fallback. */
+.mermaid-host {
+  display: flex;
+  justify-content: center;
+}
+.mermaid-host svg {
+  max-width: 100%;
+  height: auto;
+}
+.mermaid-fallback {
+  white-space: pre-wrap;
+  overflow-x: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.85rem;
+}
+
+/* Card asset images. */
+.relay-asset-img {
+  max-width: 100%;
+  height: auto;
+  border-radius: var(--mantine-radius-sm);
+  display: block;
+}
