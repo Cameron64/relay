@@ -16,18 +16,22 @@ export function Mermaid({ code }: { code: string }) {
       try {
         const mermaid = (await import('mermaid')).default;
         // theme:'dark' gives light text + edge strokes that are visible on Relay's dark card.
-        // htmlLabels:false renders labels as SVG <text> instead of <foreignObject> HTML — the
-        // foreignObject would otherwise be stripped by the SVG-only DOMPurify pass below, leaving
-        // empty boxes with no labels.
+        // Keep Mermaid's DEFAULT html labels: flowchart.htmlLabels:false lays node text out at zero
+        // size in v11, leaving empty boxes (edge labels still render, node labels don't).
         mermaid.initialize({
           securityLevel: 'strict',
           startOnLoad: false,
           theme: 'dark',
-          flowchart: { htmlLabels: false },
         });
         const id = 'mmd-' + crypto.randomUUID();
         const { svg: rendered } = await mermaid.render(id, code);
-        const clean = DOMPurify.sanitize(rendered, { USE_PROFILES: { svg: true, svgFilters: true } });
+        // Mermaid renders node/edge labels as HTML inside <foreignObject>. A svg-only DOMPurify pass
+        // keeps the <foreignObject> shell but strips its <div>/<span> contents — empty boxes. Add the
+        // html profile (and foreignObject itself) so the label markup survives sanitization.
+        const clean = DOMPurify.sanitize(rendered, {
+          USE_PROFILES: { svg: true, svgFilters: true, html: true },
+          ADD_TAGS: ['foreignObject'],
+        });
         if (!cancelled) setSvg(clean);
       } catch {
         if (!cancelled) setFailed(true);
