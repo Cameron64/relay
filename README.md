@@ -103,6 +103,8 @@ relay card  --title T [--body B|--body-stdin] [--kind note|approval|draft|diagra
             [--button "Label=action[:style]"]... [--link "Label=https://url"]...
             [--copy TEXT|--copy-stdin] [--open] [--no-push] [--high] [--wait[=SECS]]
             # --open auto-opens this desktop's browser to the card (powers the /show skill)
+relay choice --title T [--option "id=Label"]... | [--options-stdin <JSON>]
+            [--ttl D] [--high] [--no-push] [--wait[=SECS]]   # rich multiple-choice card
 relay draft --title T [--body B|--body-stdin] [--image PATH]... [--link "Label=url"]...
             [--push] [--no-open] [--high]              # rich WYSIWYG-editable message card
 relay poll  <cardId> [--wait=SECS]                     # re-poll an existing card's verdict
@@ -110,7 +112,10 @@ relay arm "<label>" | relay disarm                    # arm/clear the Stop-hook 
 relay afk   [on [--reason R] | off | status]           # away-from-keyboard flag (~/.relay/afk.json)
 ```
 
-`--wait` / `poll` exit codes: **0**=approved · **20**=changes_requested · **1**=other/dismissed · **3**=timeout.
+`--wait` / `poll` / `choice` always print **one JSON line on stdout** with an explicit `status`
+(`answered` · `pending` · `notfound` · `error` · `created`) — key off that, not the exit code.
+Exit codes mirror it: **0**=approved · **20**=changes_requested · **1**=other/dismissed verdict ·
+**3**=timeout · **4**=notfound (expired/dismissed) · **5**=error (· **2**=usage).
 `relay afk status` exit codes: **0**=at desk · **10**=AFK (the command itself never fails; the code
 encodes state). The `/show`, `/draft`, and `/afk` Claude Code skills wrap these for everyday use.
 

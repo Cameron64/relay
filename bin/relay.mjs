@@ -7,9 +7,11 @@
 //   relay poll  <cardId> [--wait=SECS]                     # re-poll an existing card's verdict
 //   relay arm "<label>" / relay disarm                    # arm/clear the Stop-hook "task done" ping
 //
-// --wait / poll exit codes (relay-specific): 0=approved  20=changes_requested  1=other  3=timeout.
-// On timeout, the cardId is printed so Claude can re-issue `relay poll <id> --wait=50` in a
-// fresh Bash call — the bounded-poll pattern that keeps every call under the harness limit.
+// Every terminal result of card/choice/poll is ONE line of JSON on stdout with an explicit
+// `status` (answered|pending|notfound|error|created) — parse that, not the exit code. Exit codes
+// (relay-specific): 0=approved 20=changes_requested 1=other-verdict 3=timeout 4=notfound 5=error
+// (2=usage). On timeout the cardId is printed so Claude can re-issue `relay poll <id> --wait=50`
+// in a fresh Bash call — the bounded-poll pattern that keeps every call under the harness limit.
 
 import { readFileSync, existsSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join, extname } from 'node:path';
@@ -66,6 +68,14 @@ async function readStdin() {
 function die(msg, code = 1) {
   process.stderr.write(msg + '\n');
   process.exit(code);
+}
+
+// The machine-readable result: every terminal outcome of card/choice/poll emits exactly ONE line
+// of JSON on stdout, always carrying an explicit `status` (answered|pending|notfound|error|created),
+// so a caller can key off stdout and never has to disambiguate by exit code. Human-readable status
+// goes to stderr separately.
+function emit(obj) {
+  process.stdout.write(JSON.stringify(obj) + '\n');
 }
 
 function requireConfig() {
@@ -254,14 +264,14 @@ async function pollUntil(cfg, id, totalSecs) {
 
 function reportVerdict(id, data) {
   const r = data.response || {};
-  process.stdout.write(JSON.stringify({ verdict: r.verdict, action: r.action, note: r.note, id }) + '\n');
+  emit({ status: 'answered', verdict: r.verdict, action: r.action, note: r.note ?? null, id });
   const noteStr = r.note ? ` — “${r.note}”` : '';
   process.stderr.write(`relay: ${r.verdict}${noteStr}\n`);
   process.exit(verdictExit(r.verdict));
 }
 
 // POST a card payload, optionally open the browser, and (with --wait) block for a verdict. Shared by
-// `relay card` and `relay choice` — same output contract and wait/poll exit codes (0/20/1/3).
+// `relay card` and `relay choice` — same output contract and wait/poll exit codes (see file header).
 async function createAndWait(cfg, payload, flags, cmdName) {
   let res;
   try {
@@ -271,9 +281,16 @@ async function createAndWait(cfg, payload, flags, cmdName) {
       body: JSON.stringify(payload),
     });
   } catch (e) {
-    die(`relay ${cmdName}: network error: ` + e.message);
+    emit({ status: 'error', error: `network error: ${e.message}` });
+    process.stderr.write(`relay ${cmdName}: network error: ${e.message}\n`);
+    process.exit(5);
   }
-  if (!res.ok) die(`relay ${cmdName}: HTTP ${res.status}: ${await res.text()}`);
+  if (!res.ok) {
+    const text = await res.text();
+    emit({ status: 'error', error: `HTTP ${res.status}: ${text}` });
+    process.stderr.write(`relay ${cmdName}: HTTP ${res.status}: ${text}\n`);
+    process.exit(5);
+  }
   const created = await res.json();
 
   if (flags.open) {
@@ -282,7 +299,7 @@ async function createAndWait(cfg, payload, flags, cmdName) {
   }
 
   if (flags.wait === undefined) {
-    process.stdout.write(JSON.stringify({ id: created.id, url: created.url }) + '\n');
+    emit({ status: 'created', id: created.id, url: created.url });
     process.stderr.write(`relay: ${cmdName} ${created.id} created\n`);
     return;
   }
@@ -290,7 +307,12 @@ async function createAndWait(cfg, payload, flags, cmdName) {
     typeof flags.wait === 'string' && flags.wait ? Math.max(1, parseInt(flags.wait, 10) || PER_POLL_CAP) : PER_POLL_CAP;
   const result = await pollUntil(cfg, created.id, budget);
   if (result.status === 'responded') reportVerdict(created.id, result);
-  process.stdout.write(JSON.stringify({ status: 'pending', id: created.id }) + '\n');
+  if (result.status === 'notfound') {
+    emit({ status: 'notfound', id: created.id });
+    process.stderr.write(`relay: card ${created.id} not found (expired or dismissed)\n`);
+    process.exit(4);
+  }
+  emit({ status: 'pending', id: created.id });
   process.stderr.write(`relay: no response yet. Re-poll with:\n  relay poll ${created.id} --wait=50\n`);
   process.exit(3);
 }
@@ -480,7 +502,7 @@ async function cmdDraft(cfg, flags) {
   const created = await res.json();
 
   const absUrl = cfg.url + (created.url || '/?card=' + created.id);
-  process.stdout.write(JSON.stringify({ id: created.id, url: absUrl }) + '\n');
+  emit({ status: 'created', id: created.id, url: absUrl });
 
   const open = flags['no-open'] ? false : true; // default open; --no-open suppresses
   if (open && openInBrowser(absUrl, cfg.url)) {
@@ -492,12 +514,16 @@ async function cmdDraft(cfg, flags) {
 
 async function cmdPoll(cfg, args) {
   const id = args._[0];
-  if (!id) die('usage: relay poll <cardId> [--wait=SECS]');
+  if (!id) die('usage: relay poll <cardId> [--wait=SECS]', 2);
   const budget = typeof args.flags.wait === 'string' && args.flags.wait ? Math.max(1, parseInt(args.flags.wait, 10) || PER_POLL_CAP) : PER_POLL_CAP;
   const result = await pollUntil(cfg, id, budget);
-  if (result.status === 'notfound') die(`relay poll: card ${id} not found`, 1);
+  if (result.status === 'notfound') {
+    emit({ status: 'notfound', id });
+    process.stderr.write(`relay poll: card ${id} not found (expired or dismissed)\n`);
+    process.exit(4);
+  }
   if (result.status === 'responded') reportVerdict(id, result);
-  process.stdout.write(JSON.stringify({ status: 'pending', id }) + '\n');
+  emit({ status: 'pending', id });
   process.stderr.write(`relay: still pending. Re-poll with: relay poll ${id} --wait=50\n`);
   process.exit(3);
 }
@@ -595,7 +621,8 @@ async function main() {
           '  relay poll <cardId> [--wait=SECS]\n' +
           '  relay arm "<label>" | relay disarm\n' +
           '  relay afk [on [--reason R] | off | status]   # away-from-keyboard flag (~/.relay/afk.json)\n\n' +
-          'wait/poll exit codes: 0=approved 20=changes_requested 1=other 3=timeout\n' +
+          'wait/poll: stdout is one JSON line with a status (answered|pending|notfound|error|created)\n' +
+          '  exit codes: 0=approved 20=changes_requested 1=other-verdict 3=timeout 4=notfound 5=error\n' +
           'afk status exit codes: 0=at desk  10=AFK\n',
       );
       return;
