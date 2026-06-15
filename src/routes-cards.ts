@@ -117,6 +117,14 @@ appRoutes.post('/cards', requireWrite, async (c) => {
       ? [{ action: '__reply', title: 'Reply' }]
       : (respondActions.length ? respondActions : optionActions).slice(0, 2);
     const high = card.priority === 'high';
+    // Cards that solicit a response — approval / prompt / choice, or any card carrying respond
+    // buttons or options — are inherently time-sensitive (the sender is usually blocking on the
+    // answer). Send those at high Web Push urgency so FCM wakes the device instead of deferring
+    // the notification to the next Doze / battery-optimization window. requireInteraction (the
+    // sticky, un-dismissable notification) stays gated on explicit --high, so making interactive
+    // cards urgent doesn't also make every approval notification impossible to swipe away.
+    const solicitsResponse = isPrompt || respondActions.length > 0 || optionActions.length > 0;
+    const urgent = high || solicitsResponse;
     const cardUrl = '/?card=' + card.id + (isPrompt ? '&reply=1' : '');
     try {
       push = await sendPushToAll({
@@ -133,7 +141,8 @@ appRoutes.post('/cards', requireWrite, async (c) => {
         tag: card.id,
         cardId: card.id,
         ...(actions.length ? { actions } : {}),
-        ...(high ? { urgency: 'high' as const, requireInteraction: true } : {}),
+        ...(urgent ? { urgency: 'high' as const } : {}),
+        ...(high ? { requireInteraction: true } : {}),
       });
     } catch (err) {
       console.error('[cards] push failed:', err);
