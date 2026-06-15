@@ -344,9 +344,16 @@ export function listCards(opts: { since?: string; limit?: number } = {}): Card[]
 export type RespondResult =
   | { status: 'responded'; response: CardResponse }
   | { status: 'conflict'; response: CardResponse | null }
+  | { status: 'reserved' }
   | { status: 'notfound' };
 
 export function respondCard(id: string, input: { action: string; note?: string | null }): RespondResult {
+  // Reserved-namespace guard: action ids starting with '__' are internal sentinels — notably the
+  // notification "Reply" button (prompt cards) posts '__reply' from an OUT-OF-DATE service worker
+  // that predates this feature. They must never be recorded as a verdict. Rejecting here also makes
+  // such an old SW's respondInBackground fall back to opening the app at the reply composer (its
+  // non-OK branch), so the feature works gracefully across the SW upgrade without a "reopen first".
+  if (input.action.startsWith('__')) return { status: 'reserved' };
   const tx = db.transaction((): RespondResult => {
     const row = db.query('SELECT status, response, buttons FROM cards WHERE id = $id').get({ $id: id }) as any;
     if (!row) return { status: 'notfound' };

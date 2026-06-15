@@ -144,6 +144,12 @@ describe('prompt cards (free-text reply)', () => {
       expect(r.response.note).toBe('ship the choice card');
     }
   });
+  test('a reserved "__"-prefixed action (e.g. __reply from a stale SW) is rejected, card stays pending', () => {
+    const card = createCard(input({ kind: 'prompt', title: 'Q' }));
+    const r = respondCard(card.id, { action: '__reply' });
+    expect(r.status).toBe('reserved');
+    expect(getCard(card.id)?.status).toBe('pending'); // not resolved — old SW will fall back to opening the app
+  });
 });
 
 describe('validateCardInput', () => {

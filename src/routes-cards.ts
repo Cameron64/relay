@@ -181,6 +181,9 @@ appRoutes.post('/cards/:id/respond', requireUi, async (c) => {
 
   const result = cards.respondCard(id, { action, note });
   if (result.status === 'notfound') return c.json({ error: 'not found' }, 404);
+  // Reserved sentinel (e.g. '__reply' from a stale SW) — reject so the old SW falls back to opening
+  // the app at the reply composer instead of recording a junk verdict. See respondCard's guard.
+  if (result.status === 'reserved') return c.json({ error: 'reserved action' }, 400);
   if (result.status === 'conflict') return c.json({ error: 'already responded', response: result.response }, 409);
 
   resolveWaiters(id, result.response);
