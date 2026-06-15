@@ -21,6 +21,19 @@ export type Button = {
   verdict?: string;
 };
 
+// A rich choice option (kind: 'choice'). Unlike a Button (which is just a label + action), an
+// option can carry its own description, markdown body, diagram, and reference link — so a choice
+// card can present real content per option, not just a one-word button. Selecting an option
+// responds with its id (which becomes the verdict, reusing the normal respond/--wait path).
+export type Option = {
+  id: string;
+  label: string;
+  description?: string;
+  body?: string; // markdown
+  mermaid?: string;
+  link?: string;
+};
+
 export type CardResponse = {
   verdict: string;
   action: string;
@@ -35,6 +48,7 @@ export type Card = {
   title: string;
   body: string | null;
   buttons: Button[];
+  options: Option[];
   copy_text: string | null;
   mermaid: string | null;
   source: Record<string, unknown> | null;
@@ -52,6 +66,7 @@ export type CardInput = {
   title: string;
   body: string | null;
   buttons: Button[];
+  options: Option[];
   copy_text: string | null;
   mermaid: string | null;
   source: Record<string, unknown> | null;
@@ -105,6 +120,7 @@ export function ensureCardsSchema(): void {
         title        TEXT NOT NULL,
         body         TEXT,
         buttons      TEXT NOT NULL DEFAULT '[]',
+        options      TEXT NOT NULL DEFAULT '[]',
         copy_text    TEXT,
         mermaid      TEXT,
         source       TEXT,
@@ -125,6 +141,13 @@ export function ensureCardsSchema(): void {
       );
       CREATE INDEX IF NOT EXISTS idx_assets_card ON card_assets(card_id);
     `);
+    // Migration: `options` was added after the table shipped. CREATE TABLE IF NOT EXISTS won't add
+    // it to an existing prod DB, so add it idempotently (SQLite allows ADD COLUMN with NOT NULL when
+    // a DEFAULT is given; existing rows backfill to '[]').
+    const cols = db.query('PRAGMA table_info(cards)').all() as { name: string }[];
+    if (!cols.some((c) => c.name === 'options')) {
+      db.exec("ALTER TABLE cards ADD COLUMN options TEXT NOT NULL DEFAULT '[]'");
+    }
     _ready = true;
   } catch (err) {
     _ready = false;
@@ -185,6 +208,34 @@ export function validateButtons(buttons: unknown): Ok<Button[]> | Err {
   return { ok: true, value: out };
 }
 
+export function validateOptions(options: unknown): Ok<Option[]> | Err {
+  if (options === undefined || options === null) return { ok: true, value: [] };
+  if (!Array.isArray(options)) return { ok: false, error: 'options must be an array' };
+  if (options.length > 10) return { ok: false, error: 'too many options (max 10)' };
+  const out: Option[] = [];
+  const seen = new Set<string>();
+  for (const raw of options) {
+    if (typeof raw !== 'object' || raw === null) return { ok: false, error: 'each option must be an object' };
+    const o = raw as Record<string, unknown>;
+    const id = typeof o.id === 'string' && o.id ? o.id : null;
+    const label = typeof o.label === 'string' && o.label ? o.label : null;
+    if (!id) return { ok: false, error: 'option.id required' };
+    if (!label) return { ok: false, error: 'option.label required' };
+    if (seen.has(id)) return { ok: false, error: `duplicate option id: ${id}` };
+    seen.add(id);
+    const opt: Option = { id, label };
+    if (typeof o.description === 'string') opt.description = o.description;
+    if (typeof o.body === 'string') opt.body = o.body;
+    if (typeof o.mermaid === 'string') opt.mermaid = o.mermaid;
+    if (typeof o.link === 'string') {
+      if (!/^https?:\/\//i.test(o.link)) return { ok: false, error: 'option.link must start with http:// or https://' };
+      opt.link = o.link;
+    }
+    out.push(opt);
+  }
+  return { ok: true, value: out };
+}
+
 export function validateCardInput(body: unknown): Ok<CardInput> | Err {
   if (typeof body !== 'object' || body === null) return { ok: false, error: 'body must be an object' };
   const b = body as Record<string, unknown>;
@@ -195,6 +246,8 @@ export function validateCardInput(body: unknown): Ok<CardInput> | Err {
   const bodyText = typeof b.body === 'string' ? b.body : null;
   const bv = validateButtons(b.buttons);
   if (!bv.ok) return bv;
+  const ov = validateOptions(b.options);
+  if (!ov.ok) return ov;
   const priority = b.priority === 'high' ? 'high' : 'normal';
   const copy_text =
     typeof b.copy_text === 'string' ? b.copy_text : typeof b.copyText === 'string' ? (b.copyText as string) : null;
@@ -203,7 +256,7 @@ export function validateCardInput(body: unknown): Ok<CardInput> | Err {
   const expires_at = typeof b.expires_at === 'string' ? b.expires_at : null;
   return {
     ok: true,
-    value: { kind, title, body: bodyText, buttons: bv.value, copy_text, mermaid, source, priority, expires_at },
+    value: { kind, title, body: bodyText, buttons: bv.value, options: ov.value, copy_text, mermaid, source, priority, expires_at },
   };
 }
 
@@ -218,6 +271,7 @@ function hydrate(row: any): Card {
     title: row.title,
     body: row.body,
     buttons: safeJSON<Button[]>(row.buttons, []),
+    options: safeJSON<Option[]>(row.options, []),
     copy_text: row.copy_text,
     mermaid: row.mermaid,
     source: safeJSON<Record<string, unknown> | null>(row.source, null),
@@ -236,8 +290,8 @@ export function createCard(value: CardInput, assets: { mime: string; bytes: Uint
   const now = new Date().toISOString();
   const tx = db.transaction(() => {
     db.query(
-      `INSERT INTO cards (id, created_at, kind, title, body, buttons, copy_text, mermaid, source, status, priority, expires_at, push_sent)
-       VALUES ($id, $created, $kind, $title, $body, $buttons, $copy, $mermaid, $source, 'pending', $priority, $expires, 0)`,
+      `INSERT INTO cards (id, created_at, kind, title, body, buttons, options, copy_text, mermaid, source, status, priority, expires_at, push_sent)
+       VALUES ($id, $created, $kind, $title, $body, $buttons, $options, $copy, $mermaid, $source, 'pending', $priority, $expires, 0)`,
     ).run({
       $id: id,
       $created: now,
@@ -245,6 +299,7 @@ export function createCard(value: CardInput, assets: { mime: string; bytes: Uint
       $title: value.title,
       $body: value.body,
       $buttons: JSON.stringify(value.buttons || []),
+      $options: JSON.stringify(value.options || []),
       $copy: value.copy_text ?? null,
       $mermaid: value.mermaid ?? null,
       $source: value.source ? JSON.stringify(value.source) : null,

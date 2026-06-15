@@ -5,6 +5,7 @@ import { db } from './store.ts';
 import {
   ensureCardsSchema,
   validateButtons,
+  validateOptions,
   validateCardInput,
   createCard,
   getCard,
@@ -24,6 +25,7 @@ function input(over: Partial<Parameters<typeof createCard>[0]> = {}) {
     title: 'x',
     body: null,
     buttons: [],
+    options: [],
     copy_text: null,
     mermaid: null,
     source: null,
@@ -80,6 +82,56 @@ describe('validateButtons', () => {
   });
 });
 
+describe('validateOptions', () => {
+  test('accepts rich options', () => {
+    const r = validateOptions([
+      { id: 'a', label: 'Plan A', description: 'cheap', body: '# details', mermaid: 'graph TD;X-->Y', link: 'https://x.io' },
+      { id: 'b', label: 'Plan B' },
+    ]);
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value).toHaveLength(2);
+  });
+  test('treats missing/empty as an empty array', () => {
+    expect(validateOptions(undefined).ok).toBe(true);
+    const r = validateOptions(null);
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value).toEqual([]);
+  });
+  test('requires id and label', () => {
+    expect(validateOptions([{ label: 'no id' }]).ok).toBe(false);
+    expect(validateOptions([{ id: 'x' }]).ok).toBe(false);
+  });
+  test('rejects duplicate ids', () => {
+    const r = validateOptions([{ id: 'x', label: 'A' }, { id: 'x', label: 'B' }]);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toContain('duplicate');
+  });
+  test('rejects a non-http option link', () => {
+    expect(validateOptions([{ id: 'x', label: 'A', link: 'javascript:alert(1)' }]).ok).toBe(false);
+  });
+  test('rejects more than 10 options and non-arrays', () => {
+    expect(validateOptions(Array.from({ length: 11 }, (_, i) => ({ id: 'o' + i, label: 'o' + i }))).ok).toBe(false);
+    expect(validateOptions('nope').ok).toBe(false);
+  });
+});
+
+describe('choice cards', () => {
+  test('createCard stores and hydrates options', () => {
+    const card = createCard(
+      input({ kind: 'choice', title: 'Pick a plan', options: [{ id: 'a', label: 'A', body: '# A' }, { id: 'b', label: 'B' }] }),
+    );
+    const fresh = getCard(card.id);
+    expect(fresh?.options).toHaveLength(2);
+    expect(fresh?.options[0]).toMatchObject({ id: 'a', label: 'A', body: '# A' });
+  });
+  test('responding with an option id records it as the verdict', () => {
+    const card = createCard(input({ kind: 'choice', title: 'Pick', options: [{ id: 'opt-a', label: 'A' }, { id: 'opt-b', label: 'B' }] }));
+    const r = respondCard(card.id, { action: 'opt-b' });
+    expect(r.status).toBe('responded');
+    if (r.status === 'responded') expect(r.response.verdict).toBe('opt-b');
+  });
+});
+
 describe('validateCardInput', () => {
   test('rejects unknown kind', () => {
     const r = validateCardInput({ kind: 'explosion', title: 'x' });
@@ -104,6 +156,7 @@ describe('respondCard — first-response-wins', () => {
       title: 'Approve?',
       body: null,
       buttons: [{ id: 'approved', label: 'Approve', behavior: 'respond', verdict: 'approved' }],
+      options: [],
       copy_text: null,
       mermaid: null,
       source: null,
@@ -131,6 +184,7 @@ describe('respondCard — first-response-wins', () => {
       title: 'Pick',
       body: null,
       buttons: [{ id: 'opt-a', label: 'A', behavior: 'respond', verdict: undefined as any }],
+      options: [],
       copy_text: null,
       mermaid: null,
       source: null,
@@ -206,7 +260,7 @@ describe('assets', () => {
   test('createCard stores assets and getAsset returns bytes', () => {
     const bytes = new Uint8Array([1, 2, 3, 4, 5]);
     const card = createCard(
-      { kind: 'image', title: 'shot', body: null, buttons: [], copy_text: null, mermaid: null, source: null, priority: 'normal', expires_at: null },
+      { kind: 'image', title: 'shot', body: null, buttons: [], options: [], copy_text: null, mermaid: null, source: null, priority: 'normal', expires_at: null },
       [{ mime: 'image/png', bytes }],
     );
     expect(card.assets.length).toBe(1);

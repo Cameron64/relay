@@ -23,8 +23,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // --- arg parsing -----------------------------------------------------------
 // Returns { _: positionals, flags: {...} }. Repeatable flags (image/button/link) collect
 // into arrays. `--flag=value`, `--flag value`, and bare booleans all supported.
-const REPEATABLE = new Set(['image', 'button', 'link']);
-const BOOLEANS = new Set(['body-stdin', 'copy-stdin', 'high', 'push', 'no-push', 'open', 'no-open', 'keep']);
+const REPEATABLE = new Set(['image', 'button', 'link', 'option']);
+const BOOLEANS = new Set(['body-stdin', 'copy-stdin', 'high', 'push', 'no-push', 'open', 'no-open', 'keep', 'options-stdin']);
 
 function parseArgs(argv) {
   const _ = [];
@@ -121,6 +121,25 @@ export function parseLinkSpec(spec) {
   const value = spec.slice(eq + 1).trim();
   if (!/^https?:\/\//i.test(value)) throw new Error(`--link url must be http(s): "${value}"`);
   return { id: 'link-' + label.toLowerCase().replace(/[^a-z0-9]+/g, '-'), label, behavior: 'link', value };
+}
+
+// --- choice option spec parser (exported for tests) ------------------------
+// Simple text-only options for `relay choice`. "id=Label" sets an explicit id; a bare "Label"
+// derives the id by slugifying it (rich options — body/diagram/link — come via --options-stdin JSON).
+function slugifyId(s) {
+  return s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'opt';
+}
+export function parseOptionSpec(spec) {
+  const eq = spec.indexOf('=');
+  if (eq < 0) {
+    const label = spec.trim();
+    if (!label) throw new Error(`bad --option "${spec}"`);
+    return { id: slugifyId(label), label };
+  }
+  const id = spec.slice(0, eq).trim();
+  const label = spec.slice(eq + 1).trim();
+  if (!id || !label) throw new Error(`bad --option "${spec}" (expected "id=Label" or "Label")`);
+  return { id, label };
 }
 
 // --- draft template (exported for tests) -----------------------------------
@@ -241,6 +260,41 @@ function reportVerdict(id, data) {
   process.exit(verdictExit(r.verdict));
 }
 
+// POST a card payload, optionally open the browser, and (with --wait) block for a verdict. Shared by
+// `relay card` and `relay choice` — same output contract and wait/poll exit codes (0/20/1/3).
+async function createAndWait(cfg, payload, flags, cmdName) {
+  let res;
+  try {
+    res = await fetch(`${cfg.url}/api/cards`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-write-token': cfg.writeToken },
+      body: JSON.stringify(payload),
+    });
+  } catch (e) {
+    die(`relay ${cmdName}: network error: ` + e.message);
+  }
+  if (!res.ok) die(`relay ${cmdName}: HTTP ${res.status}: ${await res.text()}`);
+  const created = await res.json();
+
+  if (flags.open) {
+    const absUrl = cfg.url + (created.url || '/?card=' + created.id);
+    if (openInBrowser(absUrl, cfg.url)) process.stderr.write(`relay: opened ${absUrl}\n`);
+  }
+
+  if (flags.wait === undefined) {
+    process.stdout.write(JSON.stringify({ id: created.id, url: created.url }) + '\n');
+    process.stderr.write(`relay: ${cmdName} ${created.id} created\n`);
+    return;
+  }
+  const budget =
+    typeof flags.wait === 'string' && flags.wait ? Math.max(1, parseInt(flags.wait, 10) || PER_POLL_CAP) : PER_POLL_CAP;
+  const result = await pollUntil(cfg, created.id, budget);
+  if (result.status === 'responded') reportVerdict(created.id, result);
+  process.stdout.write(JSON.stringify({ status: 'pending', id: created.id }) + '\n');
+  process.stderr.write(`relay: no response yet. Re-poll with:\n  relay poll ${created.id} --wait=50\n`);
+  process.exit(3);
+}
+
 // --- commands --------------------------------------------------------------
 async function cmdInit(flags) {
   const url = typeof flags.url === 'string' ? flags.url : '';
@@ -345,40 +399,54 @@ async function cmdCard(cfg, flags) {
     ...(typeof flags['push-body'] === 'string' ? { pushBody: flags['push-body'] } : {}),
   };
 
-  let res;
-  try {
-    res = await fetch(`${cfg.url}/api/cards`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-write-token': cfg.writeToken },
-      body: JSON.stringify(payload),
-    });
-  } catch (e) {
-    die('relay card: network error: ' + e.message);
-  }
-  if (!res.ok) die(`relay card: HTTP ${res.status}: ${await res.text()}`);
-  const created = await res.json();
+  // --open auto-opens the desktop browser to the card (what /show uses); --wait blocks for a verdict.
+  return createAndWait(cfg, payload, flags, 'card');
+}
 
-  // --open: auto-open the desktop browser to the card (what /show uses). Assemble the ABSOLUTE
-  // url the same way cmdDraft does — created.url is relative ("/?card=<hex16>"), and isSameOrigin
-  // (inside openInBrowser) rejects a relative url, silently opening nothing. Runs before either
-  // exit branch so it fires for both the no-wait (default) and --wait cases.
-  if (flags.open) {
-    const absUrl = cfg.url + (created.url || '/?card=' + created.id);
-    if (openInBrowser(absUrl, cfg.url)) process.stderr.write(`relay: opened ${absUrl}\n`);
+// `relay choice` — a rich multiple-choice card. Options come from --options-stdin / --options FILE
+// (a JSON array of {id,label,description?,body?,mermaid?,link?}) for rich options, or repeatable
+// --option "id=Label" / "Label" for simple ones. --wait returns the chosen option id as the verdict.
+async function cmdChoice(cfg, flags) {
+  const title = typeof flags.title === 'string' ? flags.title : null;
+  if (!title) die('relay choice: --title is required');
+  const body = typeof flags.body === 'string' ? flags.body : null;
+
+  // Rich options as JSON (stdin or file), then any simple --option shorthands appended.
+  let options = [];
+  let json = '';
+  if (flags['options-stdin']) json = await readStdin();
+  else if (typeof flags.options === 'string') json = readFileSync(flags.options, 'utf8');
+  if (json.trim()) {
+    try {
+      options = JSON.parse(json);
+    } catch {
+      die('relay choice: --options must be a valid JSON array');
+    }
+    if (!Array.isArray(options)) die('relay choice: --options JSON must be an array');
+  }
+  for (const spec of flags.option || []) options.push(parseOptionSpec(spec));
+  if (!options.length) die('relay choice: provide --option "Label" (repeatable) or --options-stdin <JSON array>');
+
+  let expiresAt = null;
+  if (flags.keep) expiresAt = '9999-12-31T23:59:59.999Z';
+  else if (flags.ttl !== undefined) {
+    const ms = parseTtl(flags.ttl);
+    if (ms == null) die(`relay choice: bad --ttl "${flags.ttl}" (use e.g. 30m, 2h, 1d)`);
+    expiresAt = new Date(Date.now() + ms).toISOString();
   }
 
-  if (flags.wait === undefined) {
-    process.stdout.write(JSON.stringify({ id: created.id, url: created.url }) + '\n');
-    process.stderr.write(`relay: card ${created.id} created\n`);
-    return;
-  }
-  const budget = typeof flags.wait === 'string' && flags.wait ? Math.max(1, parseInt(flags.wait, 10) || PER_POLL_CAP) : PER_POLL_CAP;
-  const result = await pollUntil(cfg, created.id, budget);
-  if (result.status === 'responded') reportVerdict(created.id, result);
-  // timeout
-  process.stdout.write(JSON.stringify({ status: 'pending', id: created.id }) + '\n');
-  process.stderr.write(`relay: no response yet. Re-poll with:\n  relay poll ${created.id} --wait=50\n`);
-  process.exit(3);
+  const payload = {
+    kind: 'choice',
+    title,
+    body,
+    options,
+    buttons: [],
+    priority: flags.high ? 'high' : 'normal',
+    push: flags['no-push'] ? false : true,
+    source: { cwd: process.cwd(), host: process.env.COMPUTERNAME || process.env.HOSTNAME || null },
+    ...(expiresAt ? { expires_at: expiresAt } : {}),
+  };
+  return createAndWait(cfg, payload, flags, 'choice');
 }
 
 async function cmdDraft(cfg, flags) {
@@ -494,6 +562,8 @@ async function main() {
       return cmdNotify(requireConfig(), args.flags);
     case 'card':
       return cmdCard(requireConfig(), args.flags);
+    case 'choice':
+      return cmdChoice(requireConfig(), args.flags);
     case 'draft':
       return cmdDraft(requireConfig(), args.flags);
     case 'poll':
@@ -517,6 +587,9 @@ async function main() {
           '             [--copy TEXT|--copy-stdin] [--ttl 30m|2h|1d] [--keep] [--open] [--no-push] [--high] [--wait[=SECS]]\n' +
           '             # --open auto-opens this desktop\'s browser to the card (what /show uses)\n' +
           '             # --ttl sets when the card auto-clears from the feed; --keep never expires it\n' +
+          '  relay choice --title T [--body B] [--option "id=Label"]... | [--options-stdin <JSON>]\n' +
+          '             [--ttl D] [--no-push] [--high] [--wait[=SECS]]   # rich multiple-choice card;\n' +
+          '             # JSON option = {id,label,description?,body?,mermaid?,link?}; --wait returns the chosen id\n' +
           '  relay draft --title T [--body B|--body-stdin] [--image PATH]... [--link "Label=url"]...\n' +
           '             [--push] [--no-open] [--high]   # rich WYSIWYG-editable message card; opens your browser\n' +
           '  relay poll <cardId> [--wait=SECS]\n' +

@@ -5,7 +5,7 @@ import os from 'node:os';
 import { join } from 'node:path';
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 // @ts-ignore — zero-dep .mjs CLI has no .d.ts; the parsers are plain functions.
-import { parseButtonSpec, parseLinkSpec, buildDraftPayload, browserOpenCommand, isSameOrigin, parseTtl } from '../bin/relay.mjs';
+import { parseButtonSpec, parseLinkSpec, parseOptionSpec, buildDraftPayload, browserOpenCommand, isSameOrigin, parseTtl } from '../bin/relay.mjs';
 // @ts-ignore — afk helpers live in the shared lib (read pure; the CLI does the writes).
 import { afkPath, readAfk } from '../lib/relay-lib.mjs';
 
@@ -26,6 +26,19 @@ describe('parseTtl', () => {
     expect(parseTtl('soon')).toBeNull();
     expect(parseTtl('2weeks')).toBeNull();
     expect(parseTtl('')).toBeNull();
+  });
+});
+
+describe('parseOptionSpec', () => {
+  test('"id=Label" sets an explicit id', () => {
+    expect(parseOptionSpec('ship=Ship it')).toEqual({ id: 'ship', label: 'Ship it' });
+  });
+  test('a bare "Label" slugifies the id', () => {
+    expect(parseOptionSpec('Ship it now!')).toEqual({ id: 'ship-it-now', label: 'Ship it now!' });
+  });
+  test('throws on an empty spec', () => {
+    expect(() => parseOptionSpec('')).toThrow();
+    expect(() => parseOptionSpec('=Label')).toThrow();
   });
 });
 

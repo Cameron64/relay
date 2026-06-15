@@ -15,6 +15,16 @@ export interface CardButton {
   sendLabel?: string;
 }
 
+// A rich choice option (kind: 'choice'). Selecting it responds with its id (-> verdict).
+export interface CardOption {
+  id: string;
+  label: string;
+  description?: string;
+  body?: string; // markdown
+  mermaid?: string;
+  link?: string;
+}
+
 export interface Asset {
   id: string;
   mime?: string;
@@ -40,6 +50,7 @@ export interface Card {
   source?: CardSource | null;
   assets?: Asset[];
   buttons?: CardButton[];
+  options?: CardOption[];
   mermaid?: string | null;
   copy_text?: string | null;
   status: 'pending' | 'responded' | 'dismissed';

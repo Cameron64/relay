@@ -99,13 +99,15 @@ appRoutes.post('/cards', requireWrite, async (c) => {
   const wantPush = body.push !== false;
   let push: unknown = null;
   if (wantPush && isPushConfigured()) {
-    // Surface respond buttons as notification action buttons (Chrome/Android shows up to 2) so the
-    // user can answer straight from the notification — the SW POSTs the tapped button id to
-    // /respond in the background. High-priority cards get a delivery-urgency hint + requireInteraction.
-    const actions = card.buttons
+    // Surface respond buttons (or, for choice cards, the first options) as notification action
+    // buttons (Chrome/Android shows up to 2) so the user can answer straight from the notification —
+    // the SW POSTs the tapped id to /respond in the background. High-priority cards get a delivery-
+    // urgency hint + requireInteraction.
+    const respondActions = card.buttons
       .filter((b) => b.behavior === 'respond')
-      .slice(0, 2)
       .map((b) => ({ action: b.id, title: b.label }));
+    const optionActions = card.options.map((o) => ({ action: o.id, title: o.label }));
+    const actions = (respondActions.length ? respondActions : optionActions).slice(0, 2);
     const high = card.priority === 'high';
     try {
       push = await sendPushToAll({

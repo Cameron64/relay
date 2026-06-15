@@ -9,6 +9,7 @@ import { Mermaid } from './cards/Mermaid';
 import { ImageAssets } from './cards/ImageAssets';
 import { EditableDraft } from './cards/EditableDraft';
 import { Actions } from './cards/Actions';
+import { ChoiceCard } from './cards/ChoiceCard';
 import { ResolvedBanner } from './ResolvedBanner';
 import type { Card } from '../types';
 
@@ -42,6 +43,7 @@ export function CardView({ card }: { card: Card }) {
   }, [flash, card.id]);
 
   const isEditableDraft = card.kind === 'draft' && !!card.source?.editable;
+  const isChoice = card.kind === 'choice' && !!card.options?.length;
   const isResolved = card.status === 'responded' && !!card.response;
   const hasActions = !isResolved && !!card.buttons?.length;
 
@@ -91,7 +93,13 @@ export function CardView({ card }: { card: Card }) {
 
       {card.mermaid ? <Mermaid code={card.mermaid} /> : null}
 
-      {isResolved ? <ResolvedBanner response={card.response!} /> : hasActions ? <Actions card={card} /> : null}
+      {isChoice ? (
+        <ChoiceCard card={card} />
+      ) : isResolved ? (
+        <ResolvedBanner response={card.response!} />
+      ) : hasActions ? (
+        <Actions card={card} />
+      ) : null}
     </MCard>
   );
 }
