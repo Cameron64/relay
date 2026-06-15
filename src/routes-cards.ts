@@ -103,22 +103,33 @@ appRoutes.post('/cards', requireWrite, async (c) => {
     // buttons (Chrome/Android shows up to 2) so the user can answer straight from the notification —
     // the SW POSTs the tapped id to /respond in the background. High-priority cards get a delivery-
     // urgency hint + requireInteraction.
+    //
+    // A `prompt` card is the exception: it wants a FREE-TEXT reply, which can't be typed from a
+    // notification on a PWA. Its single action is the reserved '__reply' button that the SW treats as
+    // "open the app focused on the reply box" (not a background respond), and its deep link carries
+    // &reply=1 so the composer auto-focuses on arrival.
+    const isPrompt = card.kind === 'prompt';
     const respondActions = card.buttons
       .filter((b) => b.behavior === 'respond')
       .map((b) => ({ action: b.id, title: b.label }));
     const optionActions = card.options.map((o) => ({ action: o.id, title: o.label }));
-    const actions = (respondActions.length ? respondActions : optionActions).slice(0, 2);
+    const actions = isPrompt
+      ? [{ action: '__reply', title: 'Reply' }]
+      : (respondActions.length ? respondActions : optionActions).slice(0, 2);
     const high = card.priority === 'high';
+    const cardUrl = '/?card=' + card.id + (isPrompt ? '&reply=1' : '');
     try {
       push = await sendPushToAll({
         title: card.title,
         body:
           typeof body.pushBody === 'string' && body.pushBody
             ? body.pushBody
-            : card.kind === 'approval'
-              ? 'Tap to review & respond'
-              : 'Tap to view',
-        url: '/?card=' + card.id,
+            : isPrompt
+              ? 'Tap Reply to answer'
+              : card.kind === 'approval'
+                ? 'Tap to review & respond'
+                : 'Tap to view',
+        url: cardUrl,
         tag: card.id,
         cardId: card.id,
         ...(actions.length ? { actions } : {}),

@@ -1,7 +1,7 @@
 // Mirrors the backend card JSON (src/cards-store.ts / src/routes-cards.ts). This is the FROZEN
 // integration contract — the React app consumes it, the backend is not changing.
 
-export type Kind = 'note' | 'approval' | 'draft' | 'diagram' | 'image' | 'choice';
+export type Kind = 'note' | 'approval' | 'draft' | 'diagram' | 'image' | 'choice' | 'prompt';
 export type Behavior = 'respond' | 'copy' | 'link';
 export type ButtonStyle = 'primary' | 'secondary' | 'outline' | 'danger' | 'note';
 export type Verdict = 'approved' | 'changes_requested' | 'dismissed' | (string & {});
@@ -39,6 +39,7 @@ export interface CardSource {
   editable?: boolean;
   cwd?: string;
   host?: string | null;
+  placeholder?: string; // prompt cards: composer placeholder text (set by `relay ask --placeholder`)
   [key: string]: unknown;
 }
 

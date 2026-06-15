@@ -10,7 +10,9 @@ import { ImageAssets } from './cards/ImageAssets';
 import { EditableDraft } from './cards/EditableDraft';
 import { Actions } from './cards/Actions';
 import { ChoiceCard } from './cards/ChoiceCard';
+import { PromptReply } from './cards/PromptReply';
 import { ResolvedBanner } from './ResolvedBanner';
+import { replyRequested } from '../utils/focus';
 import type { Card } from '../types';
 
 export function CardView({ card }: { card: Card }) {
@@ -26,7 +28,7 @@ export function CardView({ card }: { card: Card }) {
     void dismiss(card.id);
   };
 
-  // Deep-link ?card=<id>: scroll + flash + (editable draft) focus, exactly once per session.
+  // Deep-link ?card=<id>: scroll + flash + (editable draft / prompt reply) focus, once per session.
   useEffect(() => {
     if (claimFocus(card.id)) {
       ref.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -44,6 +46,7 @@ export function CardView({ card }: { card: Card }) {
 
   const isEditableDraft = card.kind === 'draft' && !!card.source?.editable;
   const isChoice = card.kind === 'choice' && !!card.options?.length;
+  const isPrompt = card.kind === 'prompt';
   const isResolved = card.status === 'responded' && !!card.response;
   const hasActions = !isResolved && !!card.buttons?.length;
 
@@ -97,6 +100,8 @@ export function CardView({ card }: { card: Card }) {
         <ChoiceCard card={card} />
       ) : isResolved ? (
         <ResolvedBanner response={card.response!} />
+      ) : isPrompt ? (
+        <PromptReply card={card} autoFocus={autoFocusEditor && replyRequested} />
       ) : hasActions ? (
         <Actions card={card} />
       ) : null}

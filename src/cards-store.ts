@@ -74,7 +74,7 @@ export type CardInput = {
   expires_at: string | null;
 };
 
-export const VALID_KINDS = ['note', 'approval', 'draft', 'diagram', 'image', 'choice'];
+export const VALID_KINDS = ['note', 'approval', 'draft', 'diagram', 'image', 'choice', 'prompt'];
 export const VALID_BEHAVIORS = ['respond', 'copy', 'link'];
 export const VALID_STYLES = ['primary', 'secondary', 'outline', 'danger', 'note'];
 export const VALID_VERDICTS = ['approved', 'changes_requested', 'dismissed'];
@@ -84,8 +84,8 @@ export const VALID_VERDICTS = ['approved', 'changes_requested', 'dismissed'];
 // column (which was stored but never enforced before):
 //   1. Non-actionable cards (note/diagram/image/draft) auto-expire CARD_TTL_HOURS after creation
 //      unless the caller passed an explicit expires_at.
-//   2. Actionable cards (approval/choice) get NO default expiry while pending — they wait for a
-//      human, then rule 3 takes over.
+//   2. Actionable cards (approval/choice/prompt) get NO default expiry while pending — they wait
+//      for a human, then rule 3 takes over.
 //   3. Once a card is answered (respond) or dismissed, its expiry is pulled in to a short grace
 //      window (CARD_ANSWERED_TTL_HOURS) so resolved cards clear out of the feed soon after.
 // A periodic sweepExpired() (see server.ts) deletes expired rows and tells live clients to drop
@@ -94,7 +94,7 @@ export const VALID_VERDICTS = ['approved', 'changes_requested', 'dismissed'];
 // — mixing the two compares 'T'(0x54) vs ' '(0x20) and silently inverts the ordering.
 const CARD_TTL_HOURS = Number(process.env.CARD_TTL_HOURS ?? 24);
 const CARD_ANSWERED_TTL_HOURS = Number(process.env.CARD_ANSWERED_TTL_HOURS ?? 6);
-const NO_DEFAULT_EXPIRY_KINDS = new Set(['approval', 'choice']);
+const NO_DEFAULT_EXPIRY_KINDS = new Set(['approval', 'choice', 'prompt']);
 
 function defaultExpiryFor(kind: string, createdAtIso: string): string | null {
   if (NO_DEFAULT_EXPIRY_KINDS.has(kind)) return null;

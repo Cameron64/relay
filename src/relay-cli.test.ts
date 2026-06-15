@@ -5,7 +5,7 @@ import os from 'node:os';
 import { join } from 'node:path';
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 // @ts-ignore — zero-dep .mjs CLI has no .d.ts; the parsers are plain functions.
-import { parseButtonSpec, parseLinkSpec, parseOptionSpec, buildDraftPayload, browserOpenCommand, isSameOrigin, parseTtl } from '../bin/relay.mjs';
+import { parseButtonSpec, parseLinkSpec, parseOptionSpec, buildDraftPayload, buildAskPayload, verdictExit, browserOpenCommand, isSameOrigin, parseTtl } from '../bin/relay.mjs';
 // @ts-ignore — afk helpers live in the shared lib (read pure; the CLI does the writes).
 import { afkPath, readAfk } from '../lib/relay-lib.mjs';
 
@@ -119,6 +119,45 @@ describe('buildDraftPayload', () => {
   test('high priority flag', () => {
     expect(buildDraftPayload({ title: 'T', high: true }, {}).priority).toBe('high');
     expect(buildDraftPayload({ title: 'T' }, {}).priority).toBe('normal');
+  });
+});
+
+describe('buildAskPayload', () => {
+  test('builds a prompt card that pushes by default, retaining cwd/host', () => {
+    const p = buildAskPayload({ title: 'What next?' }, { cwd: '/work', host: 'BOX' });
+    expect(p.kind).toBe('prompt');
+    expect(p.title).toBe('What next?');
+    expect(p.buttons).toEqual([]);
+    expect(p.push).toBe(true); // a question must reach the phone
+    expect(p.source).toEqual({ cwd: '/work', host: 'BOX' });
+  });
+  test('--no-push opts out of the push', () => {
+    expect(buildAskPayload({ title: 'T', 'no-push': true }, {}).push).toBe(false);
+  });
+  test('--placeholder lands in source.placeholder', () => {
+    const p = buildAskPayload({ title: 'T', placeholder: 'type here…' }, {});
+    expect(p.source.placeholder).toBe('type here…');
+  });
+  test('--body-stdin uses the piped stdin as the body', () => {
+    expect(buildAskPayload({ title: 'T', 'body-stdin': true }, { stdin: 'context' }).body).toBe('context');
+  });
+  test('throws without a title', () => {
+    expect(() => buildAskPayload({}, {})).toThrow(/title/);
+  });
+  test('--keep sets a far-future expiry; --ttl converts a duration', () => {
+    expect(buildAskPayload({ title: 'T', keep: true }, {}).expires_at).toBe('9999-12-31T23:59:59.999Z');
+    expect(typeof buildAskPayload({ title: 'T', ttl: '2h' }, {}).expires_at).toBe('string');
+    expect(() => buildAskPayload({ title: 'T', ttl: 'soon' }, {})).toThrow(/ttl/);
+  });
+});
+
+describe('verdictExit', () => {
+  test('approved and reply both exit 0; changes_requested exits 20; others exit 1', () => {
+    expect(verdictExit('approved')).toBe(0);
+    expect(verdictExit('reply')).toBe(0); // a free-text answer landing is success
+    expect(verdictExit('changes_requested')).toBe(20);
+    expect(verdictExit('dismissed')).toBe(1);
+    expect(verdictExit('opt-b')).toBe(1);
   });
 });
 

@@ -5,11 +5,13 @@ const LABEL: Record<string, string> = {
   approved: '✓ Approved',
   changes_requested: '✎ Changes requested',
   dismissed: '✕ Dismissed',
+  reply: '↩ Replied',
 };
 const COLOR: Record<string, string> = {
   approved: 'green',
   changes_requested: 'yellow',
   dismissed: 'gray',
+  reply: 'indigo',
 };
 
 function label(v: Verdict): string {

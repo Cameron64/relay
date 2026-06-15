@@ -98,13 +98,16 @@ Zero-dependency, runs under `node` or `bun`. Reads `~/.relay/config.json`
 ```
 relay init  --url <https://...> --token <WRITE_TOKEN>
 relay notify [--title T] [--body B] [--url U]          # body from stdin if piped
-relay card  --title T [--body B|--body-stdin] [--kind note|approval|draft|diagram|image|choice]
+relay card  --title T [--body B|--body-stdin] [--kind note|approval|draft|diagram|image|choice|prompt]
             [--image PATH]... [--mermaid FILE|-]
             [--button "Label=action[:style]"]... [--link "Label=https://url"]...
             [--copy TEXT|--copy-stdin] [--open] [--no-push] [--high] [--wait[=SECS]]
             # --open auto-opens this desktop's browser to the card (powers the /show skill)
 relay choice --title T [--option "id=Label"]... | [--options-stdin <JSON>]
             [--ttl D] [--high] [--no-push] [--wait[=SECS]]   # rich multiple-choice card
+relay ask   --title T [--body B|--body-stdin] [--placeholder P]
+            [--ttl D] [--keep] [--high] [--no-push] [--wait[=SECS]]   # open-ended question, free-text reply
+            # push carries a "Reply" button that opens a text box; --wait returns the typed answer
 relay draft --title T [--body B|--body-stdin] [--image PATH]... [--link "Label=url"]...
             [--push] [--no-open] [--high]              # rich WYSIWYG-editable message card
 relay poll  <cardId> [--wait=SECS]                     # re-poll an existing card's verdict
@@ -112,10 +115,12 @@ relay arm "<label>" | relay disarm                    # arm/clear the Stop-hook 
 relay afk   [on [--reason R] | off | status]           # away-from-keyboard flag (~/.relay/afk.json)
 ```
 
-`--wait` / `poll` / `choice` always print **one JSON line on stdout** with an explicit `status`
-(`answered` · `pending` · `notfound` · `error` · `created`) — key off that, not the exit code.
-Exit codes mirror it: **0**=approved · **20**=changes_requested · **1**=other/dismissed verdict ·
-**3**=timeout · **4**=notfound (expired/dismissed) · **5**=error (· **2**=usage).
+`--wait` / `poll` / `choice` / `ask` always print **one JSON line on stdout** with an explicit
+`status` (`answered` · `pending` · `notfound` · `error` · `created`) — key off that, not the exit
+code. A free-text answer (`relay ask`) comes back as verdict `reply` with the text in `note` and a
+top-level `reply` field. Exit codes mirror it: **0**=approved or reply · **20**=changes_requested ·
+**1**=other/dismissed verdict · **3**=timeout · **4**=notfound (expired/dismissed) · **5**=error
+(· **2**=usage).
 `relay afk status` exit codes: **0**=at desk · **10**=AFK (the command itself never fails; the code
 encodes state). The `/show`, `/draft`, and `/afk` Claude Code skills wrap these for everyday use.
 

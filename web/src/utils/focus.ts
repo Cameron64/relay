@@ -4,11 +4,15 @@
 //
 // claimFocus fires at most ONCE per deep-link entry: the first matching card (whether it arrived via
 // the initial feed render or a later SSE card-created event) scrolls into view, then we strip the
-// ?card= param from the URL. That makes the scroll a one-time event on entry rather than on every
-// load — without it, a manual refresh / PWA relaunch reloads this module (resetting the in-memory
-// guard) with the param still present and re-scrolls to the card every single time.
+// ?card= (and &reply=) params from the URL. That makes the scroll a one-time event on entry rather
+// than on every load — without it, a manual refresh / PWA relaunch reloads this module (resetting
+// the in-memory guard) with the param still present and re-scrolls to the card every single time.
+//
+// replyRequested mirrors the notification "Reply" tap (/?card=<id>&reply=1): a prompt card so
+// deep-linked auto-focuses its reply composer so the mobile keyboard pops straight away.
 
 export const focusCardId: string | null = new URLSearchParams(window.location.search).get('card');
+export const replyRequested: boolean = new URLSearchParams(window.location.search).get('reply') === '1';
 
 let handled = false;
 
@@ -20,6 +24,7 @@ export function claimFocus(id: string): boolean {
   try {
     const url = new URL(window.location.href);
     url.searchParams.delete('card');
+    url.searchParams.delete('reply');
     window.history.replaceState(null, '', url.pathname + url.search + url.hash);
   } catch {
     /* replaceState can throw in rare sandboxed contexts; the scroll already happened */

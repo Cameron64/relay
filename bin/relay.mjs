@@ -4,14 +4,17 @@
 //   relay init --url <https://...> --token <WRITE_TOKEN>   # write ~/.relay/config.json
 //   relay notify [--title T] [--body B] [--url U]          # fire a push (body from stdin if piped)
 //   relay card  --title T [...]  [--wait[=SECS]]           # create a card; --wait blocks for a verdict
+//   relay ask   --title T [...]  [--wait[=SECS]]           # ask an open-ended question; answer is free text
 //   relay poll  <cardId> [--wait=SECS]                     # re-poll an existing card's verdict
 //   relay arm "<label>" / relay disarm                    # arm/clear the Stop-hook "task done" ping
 //
-// Every terminal result of card/choice/poll is ONE line of JSON on stdout with an explicit
-// `status` (answered|pending|notfound|error|created) — parse that, not the exit code. Exit codes
-// (relay-specific): 0=approved 20=changes_requested 1=other-verdict 3=timeout 4=notfound 5=error
-// (2=usage). On timeout the cardId is printed so Claude can re-issue `relay poll <id> --wait=50`
-// in a fresh Bash call — the bounded-poll pattern that keeps every call under the harness limit.
+// Every terminal result of card/choice/ask/poll is ONE line of JSON on stdout with an explicit
+// `status` (answered|pending|notfound|error|created) — parse that, not the exit code. A free-text
+// answer (`relay ask`) comes back as verdict 'reply' with the text in both `note` and a top-level
+// `reply` field. Exit codes (relay-specific): 0=approved-or-reply 20=changes_requested 1=other-verdict
+// 3=timeout 4=notfound 5=error (2=usage). On timeout the cardId is printed so Claude can re-issue
+// `relay poll <id> --wait=50` in a fresh Bash call — the bounded-poll pattern that keeps every call
+// under the harness limit.
 
 import { readFileSync, existsSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join, extname } from 'node:path';
@@ -180,6 +183,38 @@ export function buildDraftPayload(flags, { stdin = '', cwd = '', host = null, as
   };
 }
 
+// `relay ask` — a prompt card that wants a FREE-TEXT reply. The push carries a "Reply" button that
+// opens the app focused on a text box (you can't type free text from a notification on a PWA); the
+// answer comes back via --wait as verdict 'reply' with the text in `reply`/`note`. buildAskPayload
+// is PURE (no fs/network) so it's unit-testable; cmdAsk pre-reads stdin and passes it in. Push
+// defaults TRUE — a question needs to reach the phone — unlike `relay draft` which auto-opens locally.
+export function buildAskPayload(flags, { stdin = '', cwd = '', host = null } = {}) {
+  const title = typeof flags.title === 'string' ? flags.title : null;
+  if (!title) throw new Error('relay ask: --title is required');
+  let body = typeof flags.body === 'string' ? flags.body : null;
+  if (flags['body-stdin']) body = stdin;
+  const placeholder = typeof flags.placeholder === 'string' ? flags.placeholder : null;
+
+  let expires_at;
+  if (flags.keep) expires_at = '9999-12-31T23:59:59.999Z';
+  else if (flags.ttl !== undefined) {
+    const ms = parseTtl(flags.ttl);
+    if (ms == null) throw new Error(`relay ask: bad --ttl "${flags.ttl}" (use e.g. 30m, 2h, 1d)`);
+    expires_at = new Date(Date.now() + ms).toISOString();
+  }
+
+  return {
+    kind: 'prompt',
+    title,
+    body,
+    buttons: [],
+    priority: flags.high ? 'high' : 'normal',
+    push: flags['no-push'] ? false : true,
+    source: { cwd, host, ...(placeholder ? { placeholder } : {}) },
+    ...(expires_at ? { expires_at } : {}),
+  };
+}
+
 // win32 `cmd /c start` re-parses its own command line and treats &, ^, | specially even when
 // args are passed as an array — so validate the WHOLE assembled URL (not just the hex card id)
 // before handing it to cmd.exe. Our card path /?card=<hex16> is always safe; this guards against
@@ -223,8 +258,8 @@ function openInBrowser(url, cfgUrl) {
   }
 }
 
-function verdictExit(verdict) {
-  if (verdict === 'approved') return 0;
+export function verdictExit(verdict) {
+  if (verdict === 'approved' || verdict === 'reply') return 0; // approved, or a free-text reply landed
   if (verdict === 'changes_requested') return 20;
   return 1; // dismissed / custom / other-action
 }
@@ -264,9 +299,21 @@ async function pollUntil(cfg, id, totalSecs) {
 
 function reportVerdict(id, data) {
   const r = data.response || {};
-  emit({ status: 'answered', verdict: r.verdict, action: r.action, note: r.note ?? null, id });
-  const noteStr = r.note ? ` — “${r.note}”` : '';
-  process.stderr.write(`relay: ${r.verdict}${noteStr}\n`);
+  const isReply = r.verdict === 'reply'; // a prompt card's free-text answer (relay ask)
+  emit({
+    status: 'answered',
+    verdict: r.verdict,
+    action: r.action,
+    note: r.note ?? null,
+    ...(isReply ? { reply: r.note ?? '' } : {}),
+    id,
+  });
+  if (isReply) {
+    process.stderr.write(`relay: reply — ${r.note && r.note.trim() ? r.note : '(empty)'}\n`);
+  } else {
+    const noteStr = r.note ? ` — “${r.note}”` : '';
+    process.stderr.write(`relay: ${r.verdict}${noteStr}\n`);
+  }
   process.exit(verdictExit(r.verdict));
 }
 
@@ -471,6 +518,21 @@ async function cmdChoice(cfg, flags) {
   return createAndWait(cfg, payload, flags, 'choice');
 }
 
+// `relay ask` — open-ended question, free-text answer. See buildAskPayload. --wait blocks for the
+// reply just like `relay card --wait`; the answer comes back as verdict 'reply' (exit 0) with the
+// text in the `reply`/`note` fields.
+async function cmdAsk(cfg, flags) {
+  const stdin = flags['body-stdin'] ? (await readStdin()).replace(/\s+$/, '') : '';
+  const host = process.env.COMPUTERNAME || process.env.HOSTNAME || null;
+  let payload;
+  try {
+    payload = buildAskPayload(flags, { stdin, cwd: process.cwd(), host });
+  } catch (e) {
+    die(e.message);
+  }
+  return createAndWait(cfg, payload, flags, 'ask');
+}
+
 async function cmdDraft(cfg, flags) {
   const stdin = flags['body-stdin'] ? (await readStdin()).replace(/\s+$/, '') : '';
   const assets = [];
@@ -590,6 +652,8 @@ async function main() {
       return cmdCard(requireConfig(), args.flags);
     case 'choice':
       return cmdChoice(requireConfig(), args.flags);
+    case 'ask':
+      return cmdAsk(requireConfig(), args.flags);
     case 'draft':
       return cmdDraft(requireConfig(), args.flags);
     case 'poll':
@@ -616,13 +680,17 @@ async function main() {
           '  relay choice --title T [--body B] [--option "id=Label"]... | [--options-stdin <JSON>]\n' +
           '             [--ttl D] [--no-push] [--high] [--wait[=SECS]]   # rich multiple-choice card;\n' +
           '             # JSON option = {id,label,description?,body?,mermaid?,link?}; --wait returns the chosen id\n' +
+          '  relay ask --title T [--body B|--body-stdin] [--placeholder P]\n' +
+          '             [--ttl D] [--keep] [--no-push] [--high] [--wait[=SECS]]   # open-ended question;\n' +
+          '             # the push has a Reply button that opens a text box; --wait returns the free-text reply\n' +
           '  relay draft --title T [--body B|--body-stdin] [--image PATH]... [--link "Label=url"]...\n' +
           '             [--push] [--no-open] [--high]   # rich WYSIWYG-editable message card; opens your browser\n' +
           '  relay poll <cardId> [--wait=SECS]\n' +
           '  relay arm "<label>" | relay disarm\n' +
           '  relay afk [on [--reason R] | off | status]   # away-from-keyboard flag (~/.relay/afk.json)\n\n' +
-          'wait/poll: stdout is one JSON line with a status (answered|pending|notfound|error|created)\n' +
-          '  exit codes: 0=approved 20=changes_requested 1=other-verdict 3=timeout 4=notfound 5=error\n' +
+          'wait/poll: stdout is one JSON line with a status (answered|pending|notfound|error|created);\n' +
+          '  a free-text reply (relay ask) is verdict "reply" with the text in note + a top-level "reply"\n' +
+          '  exit codes: 0=approved/reply 20=changes_requested 1=other-verdict 3=timeout 4=notfound 5=error\n' +
           'afk status exit codes: 0=at desk  10=AFK\n',
       );
       return;

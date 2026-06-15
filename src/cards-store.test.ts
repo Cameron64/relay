@@ -132,11 +132,30 @@ describe('choice cards', () => {
   });
 });
 
+describe('prompt cards (free-text reply)', () => {
+  test('responding with action "reply" records verdict "reply" + the text in note', () => {
+    const card = createCard(input({ kind: 'prompt', title: 'What next?', source: { placeholder: 'your call…' } }));
+    expect(card.kind).toBe('prompt');
+    const r = respondCard(card.id, { action: 'reply', note: 'ship the choice card' });
+    expect(r.status).toBe('responded');
+    if (r.status === 'responded') {
+      expect(r.response.verdict).toBe('reply');
+      expect(r.response.action).toBe('reply');
+      expect(r.response.note).toBe('ship the choice card');
+    }
+  });
+});
+
 describe('validateCardInput', () => {
   test('rejects unknown kind', () => {
     const r = validateCardInput({ kind: 'explosion', title: 'x' });
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error).toContain('kind');
+  });
+  test('accepts kind "prompt"', () => {
+    const r = validateCardInput({ kind: 'prompt', title: 'What next?' });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value.kind).toBe('prompt');
   });
   test('requires a title', () => {
     const r = validateCardInput({ kind: 'note' });
@@ -202,11 +221,12 @@ describe('respondCard — first-response-wins', () => {
 });
 
 describe('expiry & dismiss', () => {
-  test('default TTL applies to notes but not to approvals/choices', () => {
+  test('default TTL applies to notes but not to approvals/choices/prompts', () => {
     expect(createCard(input({ kind: 'note' })).expires_at).not.toBeNull();
     expect(createCard(input({ kind: 'diagram' })).expires_at).not.toBeNull();
     expect(createCard(input({ kind: 'approval' })).expires_at).toBeNull();
     expect(createCard(input({ kind: 'choice' })).expires_at).toBeNull();
+    expect(createCard(input({ kind: 'prompt' })).expires_at).toBeNull();
   });
 
   test('an explicit expires_at overrides the default', () => {

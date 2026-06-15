@@ -37,7 +37,9 @@ self.addEventListener('fetch', (event) => {
 // --- Web Push -------------------------------------------------------------
 // Payload JSON sent by the server: { title, body, url, tag, cardId?, actions?, requireInteraction? }.
 // `actions` (max 2 on Chrome/Android) render as tappable buttons; a tap on one is handled in
-// notificationclick below — it POSTs the button id to /respond WITHOUT opening the app.
+// notificationclick below — it POSTs the button id to /respond WITHOUT opening the app. The one
+// reserved action, '__reply' (prompt cards), is the exception: it OPENS the app focused on the
+// reply box, because free text can't be typed from a notification.
 self.addEventListener('push', (event) => {
   let data = {};
   try {
@@ -107,6 +109,12 @@ self.addEventListener('notificationclick', (event) => {
   event.notification.close();
   const d = event.notification.data || {};
   const target = d.url || '/';
+  // '__reply' (prompt cards) must OPEN the app focused on the reply box — you can't type free text
+  // from a notification. The target url already carries &reply=1, so opening it lands on the composer.
+  if (event.action === '__reply') {
+    event.waitUntil(openOrFocus(target));
+    return;
+  }
   if (event.action && d.cardId) {
     event.waitUntil(respondInBackground(d.cardId, event.action, target));
     return;
