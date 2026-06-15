@@ -24,7 +24,7 @@ import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprot
 import { pathToFileURL } from 'node:url';
 import { loadConfig } from '../lib/relay-lib.mjs';
 import { createCard, pollResponse, sendNotify } from '../lib/relay-client.mjs';
-import { buildCardPayload, buildChoicePayload, buildAskPayload, parseTtl, VERDICT_ALIAS } from './relay.mjs';
+import { buildCardPayload, buildChoicePayload, buildAskPayload, buildPagePayload, parseTtl, VERDICT_ALIAS } from './relay.mjs';
 
 const DEFAULT_WAIT = 50; // seconds; one bounded server long-poll, safely under a typical MCP timeout
 const MAX_WAIT = 280; // cap so a caller can't request a block longer than its own client timeout
@@ -124,6 +124,20 @@ export function choiceArgsToPayload(args, ctx = {}) {
   });
 }
 
+export function pageArgsToPayload(args, ctx = {}) {
+  if (!args.title) throw new Error('relay_page: title is required');
+  if (!args.html) throw new Error('relay_page: html is required');
+  return buildPagePayload({
+    title: args.title,
+    pageHtml: args.html,
+    copyText: args.copy ?? null,
+    priority: args.high ? 'high' : 'normal',
+    push: true,
+    expiresAt: ttlToExpiresAt(args.ttl),
+    source: { cwd: ctx.cwd ?? null, host: ctx.host ?? null },
+  });
+}
+
 // Normalize a pollResponse() result into the single JSON object a blocking tool returns.
 export function formatResponse(pollResult, id) {
   if (!pollResult || pollResult.status === 'notfound') {
@@ -207,6 +221,51 @@ export const TOOL_DEFS = [
         high: { type: 'boolean', description: 'High-priority push (urgent + requireInteraction).' },
         ttl: { type: 'string', description: 'Auto-clear after a duration ("30m","2h","1d") or "keep" to never expire.' },
         waitSeconds: { type: 'number', description: 'Block up to N seconds (<=280) for a verdict. Omit / 0 = return immediately with the id.' },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'relay_page',
+    description: `Render an interactive HTML+JS PAGE on Relay (phone + desktop) — for explaining something in depth or modelling/visualising it quickly: charts, simulations, diagrams, interactive widgets, rich styled explainers. The "html" you pass is a COMPLETE HTML document shown in a SANDBOXED iframe. Returns { id, url } immediately (a page is view-only, never blocks).
+
+WHEN TO USE: prefer relay_page over relay_card's markdown when a static note won't do — you want a chart, an animation, an interactive control, a simulation, math/LaTeX, or a multi-section styled explainer.
+
+SANDBOX — design around it: the page runs in an opaque-origin iframe with sandbox="allow-scripts". It CAN load any CDN <script>/<link>, run JS, use canvas/SVG/WebGL, and fetch PUBLIC CORS APIs. It CANNOT reach Relay (no cookies/localStorage/API), CANNOT navigate the parent app, and window.alert/confirm/prompt are NO-OPS (allow-modals is omitted) — surface output/errors in the DOM, never via alert. There is no channel back to Relay.
+
+LIBRARIES (CDN <script>, all work in the sandbox): Tailwind https://cdn.tailwindcss.com | Chart.js https://cdn.jsdelivr.net/npm/chart.js | Plotly https://cdn.plot.ly/plotly-2.35.2.min.js | D3 https://cdn.jsdelivr.net/npm/d3@7 | p5.js https://cdn.jsdelivr.net/npm/p5 | Three.js (ESM importmap: https://cdn.jsdelivr.net/npm/three@0.169/build/three.module.js) | KaTeX https://cdn.jsdelivr.net/npm/katex@0.16/dist/ (+ auto-render) | Mermaid (ESM: https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs) | Alpine.js https://cdn.jsdelivr.net/npm/alpinejs (defer) | highlight.js https://cdn.jsdelivr.net/npm/highlight.js
+
+LIFETIME: pages auto-clear from the feed after ~24h by default. For an explainer worth keeping, pass ttl:"keep" (or e.g. "7d").
+
+BASE SHELL — copy this, then replace the TODO (dark theme matches Relay, mobile viewport, on-screen error overlay because alert() is muted):
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Page</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>html,body{background:#1a1b1e;color:#e9ecef;margin:0}*{box-sizing:border-box}</style>
+</head>
+<body class="p-4">
+<div id="err" style="display:none;position:fixed;left:0;right:0;bottom:0;background:#5c1f1f;color:#fff;padding:8px 12px;font:13px monospace;white-space:pre-wrap;z-index:9999"></div>
+<script>addEventListener("error",function(e){var d=document.getElementById("err");d.style.display="block";d.textContent="⚠ "+(e.message||"script error")});</script>
+
+<!-- TODO: your content + <script> here -->
+
+</body>
+</html>
+
+Richer starting points (chart / dataviz / simulation / 3d / explainer) live in the repo at lib/page-templates/.`,
+    inputSchema: {
+      type: 'object',
+      required: ['title', 'html'],
+      properties: {
+        title: { type: 'string', description: 'Card title shown above the page and in the push notification.' },
+        html: { type: 'string', description: 'A COMPLETE HTML document (starts with <!doctype html>). Rendered in a sandboxed, opaque-origin iframe (allow-scripts only). Pull libraries via CDN <script> tags.' },
+        copy: { type: 'string', description: 'Optional text offered behind a one-tap "Copy to clipboard" button.' },
+        high: { type: 'boolean', description: 'High-priority push (urgent + sticky notification).' },
+        ttl: { type: 'string', description: 'Auto-clear after a duration ("30m","2h","1d") or "keep" to never expire. Default ~24h.' },
       },
       additionalProperties: false,
     },
@@ -305,6 +364,11 @@ export async function handleCall(name, rawArgs) {
       case 'relay_card': {
         const created = await createCard(cfg, cardArgsToPayload(args, ctx));
         return settle(cfg, created, args.waitSeconds, 0); // fire-and-return unless waitSeconds is given
+      }
+      case 'relay_page': {
+        // A page is view-only — return its id/url immediately, never block for a response.
+        const created = await createCard(cfg, pageArgsToPayload(args, ctx));
+        return okResult({ status: 'created', id: created.id, url: created.url });
       }
       case 'relay_ask': {
         const created = await createCard(cfg, askArgsToPayload(args, ctx));

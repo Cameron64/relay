@@ -179,6 +179,7 @@ claude mcp add relay -- node "C:/Users/Cam Dowdle/source/repos/personal/relay/bi
 |---|---|---|
 | `relay_notify` | no | fire-and-forget push |
 | `relay_card` | optional (`waitSeconds`) | post a note / approval / diagram card; block for a verdict |
+| `relay_page` | no | post an interactive HTML+JS page (charts, sims, explainers) rendered in a sandboxed iframe |
 | `relay_ask` | yes (default 50s) | open-ended question → free-text reply |
 | `relay_choice` | yes (default 50s) | pick one of several options |
 | `relay_poll` | yes (default 50s) | resume waiting on a card that returned `pending` |

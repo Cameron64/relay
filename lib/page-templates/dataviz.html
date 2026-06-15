@@ -1,0 +1,67 @@
+<!doctype html>
+<!-- Relay page template: dataviz. Sandboxed (allow-scripts), opaque origin: no Relay/network-back, no localStorage, alert() is a no-op. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Data Viz</title>
+  <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+  <style>
+    html,body{background:#1a1b1e;color:#e9ecef;margin:0;font-family:system-ui,sans-serif}
+    .wrap{max-width:720px;margin:0 auto;padding:24px 16px}
+    h1{font-size:20px;margin:0 0 16px}
+    .card{background:#25262b;border:1px solid #373a40;border-radius:12px;padding:8px}
+    svg{display:block;width:100%;height:auto}
+    .bar{fill:#63e6be}
+    .bar:hover{fill:#38d9a9}
+    .lbl{fill:#adb5bd;font-size:11px}
+  </style>
+</head>
+<body>
+  <!-- On-screen error overlay (alert() is muted in the sandbox). Registered before other scripts. -->
+  <div id="err" style="display:none;position:fixed;left:0;right:0;bottom:0;background:#5c1f1f;color:#fff;padding:8px 12px;font:13px monospace;white-space:pre-wrap;z-index:9999"></div>
+  <script>addEventListener("error",function(e){var d=document.getElementById("err");d.style.display="block";d.textContent="⚠ "+(e.message||"script error")});</script>
+
+  <div class="wrap">
+    <h1>D3 Bar Chart</h1>
+    <div class="card"><svg id="viz" viewBox="0 0 600 320" preserveAspectRatio="xMidYMid meet"></svg></div>
+  </div>
+
+  <script>
+    // TODO: replace this inline dataset with your data.
+    var data = [
+      { name: "Alpha",   value: 34 },
+      { name: "Bravo",   value: 58 },
+      { name: "Charlie", value: 21 },
+      { name: "Delta",   value: 72 },
+      { name: "Echo",    value: 45 },
+      { name: "Foxtrot", value: 63 }
+    ];
+    // end TODO
+
+    var W = 600, H = 320, m = { top: 16, right: 16, bottom: 36, left: 36 };
+    var iw = W - m.left - m.right, ih = H - m.top - m.bottom;
+
+    var svg = d3.select("#viz");
+    var g = svg.append("g").attr("transform", "translate(" + m.left + "," + m.top + ")");
+
+    var x = d3.scaleBand().domain(data.map(function (d) { return d.name; })).range([0, iw]).padding(0.2);
+    var y = d3.scaleLinear().domain([0, d3.max(data, function (d) { return d.value; })]).nice().range([ih, 0]);
+
+    g.append("g").attr("transform", "translate(0," + ih + ")")
+      .call(d3.axisBottom(x)).attr("color", "#495057")
+      .selectAll("text").attr("class", "lbl");
+
+    g.append("g").call(d3.axisLeft(y).ticks(5)).attr("color", "#495057")
+      .selectAll("text").attr("class", "lbl");
+
+    g.selectAll(".bar").data(data).enter().append("rect")
+      .attr("class", "bar")
+      .attr("x", function (d) { return x(d.name); })
+      .attr("y", function (d) { return y(d.value); })
+      .attr("width", x.bandwidth())
+      .attr("height", function (d) { return ih - y(d.value); })
+      .attr("rx", 3);
+  </script>
+</body>
+</html>

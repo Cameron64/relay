@@ -1,0 +1,58 @@
+<!doctype html>
+<!-- Relay page template: simulation. Sandboxed (allow-scripts), opaque origin: no Relay/network-back, no localStorage, alert() is a no-op. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Simulation</title>
+  <script src="https://cdn.jsdelivr.net/npm/p5@1.9.4/lib/p5.min.js"></script>
+  <style>html,body{background:#1a1b1e;color:#e9ecef;margin:0;overflow:hidden}canvas{display:block}</style>
+</head>
+<body>
+  <!-- On-screen error overlay (alert() is muted in the sandbox). Registered before other scripts. -->
+  <div id="err" style="display:none;position:fixed;left:0;right:0;bottom:0;background:#5c1f1f;color:#fff;padding:8px 12px;font:13px monospace;white-space:pre-wrap;z-index:9999"></div>
+  <script>addEventListener("error",function(e){var d=document.getElementById("err");d.style.display="block";d.textContent="⚠ "+(e.message||"script error")});</script>
+
+  <script>
+    // TODO: tune the simulation parameters.
+    var PARTICLE_COUNT = 60;
+    var MAX_SPEED = 3;
+    var RADIUS = 8;
+    var TRAIL = 40; // 0-255, lower = longer motion trails
+    // end TODO
+
+    var particles = [];
+
+    function setup() {
+      createCanvas(windowWidth, windowHeight);
+      noStroke();
+      for (var i = 0; i < PARTICLE_COUNT; i++) {
+        particles.push({
+          x: random(width), y: random(height),
+          vx: random(-MAX_SPEED, MAX_SPEED), vy: random(-MAX_SPEED, MAX_SPEED),
+          hue: random(160, 220)
+        });
+      }
+      colorMode(HSB, 360, 100, 100, 100);
+    }
+
+    function draw() {
+      background(220, 12, 11, TRAIL); // fade for trails (HSB ~ #1a1b1e)
+      for (var i = 0; i < particles.length; i++) {
+        var p = particles[i];
+        p.x += p.vx; p.y += p.vy;
+        if (p.x < RADIUS || p.x > width - RADIUS) p.vx *= -1;
+        if (p.y < RADIUS || p.y > height - RADIUS) p.vy *= -1;
+        p.x = constrain(p.x, RADIUS, width - RADIUS);
+        p.y = constrain(p.y, RADIUS, height - RADIUS);
+        fill(p.hue, 70, 95, 90);
+        circle(p.x, p.y, RADIUS * 2);
+      }
+    }
+
+    function windowResized() {
+      resizeCanvas(windowWidth, windowHeight);
+    }
+  </script>
+</body>
+</html>

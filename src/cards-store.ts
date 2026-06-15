@@ -51,6 +51,7 @@ export type Card = {
   options: Option[];
   copy_text: string | null;
   mermaid: string | null;
+  page_html: string | null;
   source: Record<string, unknown> | null;
   status: 'pending' | 'responded' | 'dismissed';
   response: CardResponse | null;
@@ -69,15 +70,22 @@ export type CardInput = {
   options: Option[];
   copy_text: string | null;
   mermaid: string | null;
+  page_html: string | null;
   source: Record<string, unknown> | null;
   priority: 'normal' | 'high';
   expires_at: string | null;
 };
 
-export const VALID_KINDS = ['note', 'approval', 'draft', 'diagram', 'image', 'choice', 'prompt'];
+export const VALID_KINDS = ['note', 'approval', 'draft', 'diagram', 'image', 'choice', 'prompt', 'page'];
 export const VALID_BEHAVIORS = ['respond', 'copy', 'link'];
 export const VALID_STYLES = ['primary', 'secondary', 'outline', 'danger', 'note'];
 export const VALID_VERDICTS = ['approved', 'changes_requested', 'dismissed'];
+
+// kind:'page' carries a full agent-authored HTML+JS document (page_html) rendered in a sandboxed
+// iframe (web/.../PageFrame.tsx). Cap the stored doc so it can't bloat the SQLite row, the SSE
+// card-created broadcast, or the feed payload. CDN-loaded libraries don't count — only the inline
+// document does. Env-overridable; default 512 KB.
+export const PAGE_HTML_MAX = Number(process.env.RELAY_PAGE_HTML_MAX ?? 512 * 1024);
 
 // --- expiry / decluttering -------------------------------------------------
 // Cards shouldn't live in the feed forever. Three rules, all leaning on the existing expires_at
@@ -123,6 +131,7 @@ export function ensureCardsSchema(): void {
         options      TEXT NOT NULL DEFAULT '[]',
         copy_text    TEXT,
         mermaid      TEXT,
+        page_html    TEXT,
         source       TEXT,
         status       TEXT NOT NULL DEFAULT 'pending',
         response     TEXT,
@@ -147,6 +156,11 @@ export function ensureCardsSchema(): void {
     const cols = db.query('PRAGMA table_info(cards)').all() as { name: string }[];
     if (!cols.some((c) => c.name === 'options')) {
       db.exec("ALTER TABLE cards ADD COLUMN options TEXT NOT NULL DEFAULT '[]'");
+    }
+    // Migration: `page_html` (kind:'page') was added after the table shipped. Nullable TEXT, so
+    // existing rows backfill to NULL — safe on the live prod volume (no DEFAULT needed).
+    if (!cols.some((c) => c.name === 'page_html')) {
+      db.exec('ALTER TABLE cards ADD COLUMN page_html TEXT');
     }
     _ready = true;
   } catch (err) {
@@ -252,11 +266,20 @@ export function validateCardInput(body: unknown): Ok<CardInput> | Err {
   const copy_text =
     typeof b.copy_text === 'string' ? b.copy_text : typeof b.copyText === 'string' ? (b.copyText as string) : null;
   const mermaid = typeof b.mermaid === 'string' ? b.mermaid : null;
+  // page_html: required + size-capped for kind:'page'; ignored (stored null) for every other kind so
+  // a stray html field can't ride along on a note/approval/etc.
+  const pageHtmlRaw = typeof b.page_html === 'string' ? b.page_html : null;
+  let page_html: string | null = null;
+  if (kind === 'page') {
+    if (!pageHtmlRaw || !pageHtmlRaw.trim()) return { ok: false, error: 'page_html required for kind "page"' };
+    if (pageHtmlRaw.length > PAGE_HTML_MAX) return { ok: false, error: `page_html exceeds ${PAGE_HTML_MAX} bytes` };
+    page_html = pageHtmlRaw;
+  }
   const source = b.source && typeof b.source === 'object' ? (b.source as Record<string, unknown>) : null;
   const expires_at = typeof b.expires_at === 'string' ? b.expires_at : null;
   return {
     ok: true,
-    value: { kind, title, body: bodyText, buttons: bv.value, options: ov.value, copy_text, mermaid, source, priority, expires_at },
+    value: { kind, title, body: bodyText, buttons: bv.value, options: ov.value, copy_text, mermaid, page_html, source, priority, expires_at },
   };
 }
 
@@ -274,6 +297,7 @@ function hydrate(row: any): Card {
     options: safeJSON<Option[]>(row.options, []),
     copy_text: row.copy_text,
     mermaid: row.mermaid,
+    page_html: row.page_html ?? null,
     source: safeJSON<Record<string, unknown> | null>(row.source, null),
     status: row.status,
     response: safeJSON<CardResponse | null>(row.response, null),
@@ -290,8 +314,8 @@ export function createCard(value: CardInput, assets: { mime: string; bytes: Uint
   const now = new Date().toISOString();
   const tx = db.transaction(() => {
     db.query(
-      `INSERT INTO cards (id, created_at, kind, title, body, buttons, options, copy_text, mermaid, source, status, priority, expires_at, push_sent)
-       VALUES ($id, $created, $kind, $title, $body, $buttons, $options, $copy, $mermaid, $source, 'pending', $priority, $expires, 0)`,
+      `INSERT INTO cards (id, created_at, kind, title, body, buttons, options, copy_text, mermaid, page_html, source, status, priority, expires_at, push_sent)
+       VALUES ($id, $created, $kind, $title, $body, $buttons, $options, $copy, $mermaid, $page_html, $source, 'pending', $priority, $expires, 0)`,
     ).run({
       $id: id,
       $created: now,
@@ -302,6 +326,7 @@ export function createCard(value: CardInput, assets: { mime: string; bytes: Uint
       $options: JSON.stringify(value.options || []),
       $copy: value.copy_text ?? null,
       $mermaid: value.mermaid ?? null,
+      $page_html: value.page_html ?? null,
       $source: value.source ? JSON.stringify(value.source) : null,
       $priority: value.priority || 'normal',
       $expires: value.expires_at ?? defaultExpiryFor(value.kind, now),

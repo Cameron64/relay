@@ -4,6 +4,7 @@ import { test, expect, describe, beforeAll, beforeEach } from 'bun:test';
 import { db } from './store.ts';
 import {
   ensureCardsSchema,
+  PAGE_HTML_MAX,
   validateButtons,
   validateOptions,
   validateCardInput,
@@ -28,6 +29,7 @@ function input(over: Partial<Parameters<typeof createCard>[0]> = {}) {
     options: [],
     copy_text: null,
     mermaid: null,
+    page_html: null,
     source: null,
     priority: 'normal' as const,
     expires_at: null,
@@ -174,6 +176,40 @@ describe('validateCardInput', () => {
   });
 });
 
+describe('page cards (kind:page)', () => {
+  test('requires non-empty page_html for kind "page"', () => {
+    expect(validateCardInput({ kind: 'page', title: 'P' }).ok).toBe(false);
+    expect(validateCardInput({ kind: 'page', title: 'P', page_html: '   ' }).ok).toBe(false);
+    const ok = validateCardInput({ kind: 'page', title: 'P', page_html: '<!doctype html><p>hi</p>' });
+    expect(ok.ok).toBe(true);
+    if (ok.ok) {
+      expect(ok.value.kind).toBe('page');
+      expect(ok.value.page_html).toBe('<!doctype html><p>hi</p>');
+    }
+  });
+
+  test('rejects page_html over the size cap', () => {
+    const huge = 'x'.repeat(PAGE_HTML_MAX + 1);
+    const r = validateCardInput({ kind: 'page', title: 'P', page_html: huge });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toContain('exceeds');
+  });
+
+  test('ignores page_html on non-page kinds', () => {
+    const r = validateCardInput({ kind: 'note', title: 'N', page_html: '<p>nope</p>' });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value.page_html).toBeNull();
+  });
+
+  test('createCard round-trips page_html through getCard (equality, not truthy)', () => {
+    const html = '<!doctype html><html><body><h1>Chart</h1><script>1+1</script></body></html>';
+    const card = createCard(input({ kind: 'page', title: 'Viz', page_html: html }));
+    const fresh = getCard(card.id);
+    expect(fresh?.kind).toBe('page');
+    expect(fresh?.page_html).toBe(html); // guards a forgotten INSERT bind / hydrate mapping
+  });
+});
+
 describe('respondCard — first-response-wins', () => {
   test('records verdict from the matching button, then 409s the second time', () => {
     const card = createCard({
@@ -184,6 +220,7 @@ describe('respondCard — first-response-wins', () => {
       options: [],
       copy_text: null,
       mermaid: null,
+      page_html: null,
       source: null,
       priority: 'normal',
       expires_at: null,
@@ -212,6 +249,7 @@ describe('respondCard — first-response-wins', () => {
       options: [],
       copy_text: null,
       mermaid: null,
+      page_html: null,
       source: null,
       priority: 'normal',
       expires_at: null,
@@ -230,6 +268,7 @@ describe('expiry & dismiss', () => {
   test('default TTL applies to notes but not to approvals/choices/prompts', () => {
     expect(createCard(input({ kind: 'note' })).expires_at).not.toBeNull();
     expect(createCard(input({ kind: 'diagram' })).expires_at).not.toBeNull();
+    expect(createCard(input({ kind: 'page', page_html: '<p>x</p>' })).expires_at).not.toBeNull();
     expect(createCard(input({ kind: 'approval' })).expires_at).toBeNull();
     expect(createCard(input({ kind: 'choice' })).expires_at).toBeNull();
     expect(createCard(input({ kind: 'prompt' })).expires_at).toBeNull();
@@ -286,7 +325,7 @@ describe('assets', () => {
   test('createCard stores assets and getAsset returns bytes', () => {
     const bytes = new Uint8Array([1, 2, 3, 4, 5]);
     const card = createCard(
-      { kind: 'image', title: 'shot', body: null, buttons: [], options: [], copy_text: null, mermaid: null, source: null, priority: 'normal', expires_at: null },
+      { kind: 'image', title: 'shot', body: null, buttons: [], options: [], copy_text: null, mermaid: null, page_html: null, source: null, priority: 'normal', expires_at: null },
       [{ mime: 'image/png', bytes }],
     );
     expect(card.assets.length).toBe(1);

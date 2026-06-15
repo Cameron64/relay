@@ -1,7 +1,7 @@
 // Mirrors the backend card JSON (src/cards-store.ts / src/routes-cards.ts). This is the FROZEN
 // integration contract — the React app consumes it, the backend is not changing.
 
-export type Kind = 'note' | 'approval' | 'draft' | 'diagram' | 'image' | 'choice' | 'prompt';
+export type Kind = 'note' | 'approval' | 'draft' | 'diagram' | 'image' | 'choice' | 'prompt' | 'page';
 export type Behavior = 'respond' | 'copy' | 'link';
 export type ButtonStyle = 'primary' | 'secondary' | 'outline' | 'danger' | 'note';
 export type Verdict = 'approved' | 'changes_requested' | 'dismissed' | (string & {});
@@ -54,6 +54,7 @@ export interface Card {
   options?: CardOption[];
   mermaid?: string | null;
   copy_text?: string | null;
+  page_html?: string | null; // kind:'page' — full HTML+JS doc rendered in a sandboxed iframe
   status: 'pending' | 'responded' | 'dismissed';
   response?: CardResponse | null;
   created_at: string;

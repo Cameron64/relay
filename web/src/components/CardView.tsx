@@ -11,6 +11,7 @@ import { EditableDraft } from './cards/EditableDraft';
 import { Actions } from './cards/Actions';
 import { ChoiceCard } from './cards/ChoiceCard';
 import { PromptReply } from './cards/PromptReply';
+import { PageFrame } from './cards/PageFrame';
 import { ResolvedBanner } from './ResolvedBanner';
 import { replyRequested } from '../utils/focus';
 import type { Card } from '../types';
@@ -47,6 +48,7 @@ export function CardView({ card }: { card: Card }) {
   const isEditableDraft = card.kind === 'draft' && !!card.source?.editable;
   const isChoice = card.kind === 'choice' && !!card.options?.length;
   const isPrompt = card.kind === 'prompt';
+  const isPage = card.kind === 'page' && !!card.page_html;
   const isResolved = card.status === 'responded' && !!card.response;
   const hasActions = !isResolved && !!card.buttons?.length;
 
@@ -86,7 +88,9 @@ export function CardView({ card }: { card: Card }) {
       {/* non-draft image assets (editable drafts render their own with per-asset copy buttons) */}
       {!isEditableDraft && card.assets?.length ? <ImageAssets card={card} /> : null}
 
-      {isEditableDraft ? (
+      {isPage ? (
+        <PageFrame pageHtml={card.page_html} title={card.title} />
+      ) : isEditableDraft ? (
         <EditableDraft card={card} autoFocus={autoFocusEditor} />
       ) : card.kind === 'draft' && card.body ? (
         <pre className="draft-plain">{card.body}</pre>
@@ -94,7 +98,7 @@ export function CardView({ card }: { card: Card }) {
         <Markdown>{card.body}</Markdown>
       ) : null}
 
-      {card.mermaid ? <Mermaid code={card.mermaid} /> : null}
+      {!isPage && card.mermaid ? <Mermaid code={card.mermaid} /> : null}
 
       {isChoice ? (
         <ChoiceCard card={card} />

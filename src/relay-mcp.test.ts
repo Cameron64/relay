@@ -3,7 +3,9 @@
 // server (the import.meta.main / argv entry guard stays false under the test runner).
 import { test, expect, describe } from 'bun:test';
 // @ts-ignore — zero-dep .mjs server has no .d.ts
-import { cardArgsToPayload, askArgsToPayload, choiceArgsToPayload, formatResponse, TOOL_DEFS } from '../bin/relay-mcp.mjs';
+import { cardArgsToPayload, askArgsToPayload, choiceArgsToPayload, pageArgsToPayload, formatResponse, TOOL_DEFS } from '../bin/relay-mcp.mjs';
+// @ts-ignore — zero-dep .mjs has no .d.ts
+import { buildPagePayload } from '../bin/relay.mjs';
 
 describe('cardArgsToPayload', () => {
   test('builds a plain note that pushes, retaining cwd/host', () => {
@@ -105,6 +107,43 @@ describe('choiceArgsToPayload', () => {
   });
 });
 
+describe('pageArgsToPayload', () => {
+  test('builds a page card with page_html as a top-level key, view-only (no buttons), pushes', () => {
+    const p = pageArgsToPayload({ title: 'Viz', html: '<!doctype html><p>hi</p>' }, { cwd: '/w', host: 'H' });
+    expect(p.kind).toBe('page');
+    expect(p.title).toBe('Viz');
+    expect(p.page_html).toBe('<!doctype html><p>hi</p>');
+    expect(p.buttons).toEqual([]);
+    expect(p.push).toBe(true);
+    expect(p.source).toEqual({ cwd: '/w', host: 'H' });
+  });
+
+  test('high → priority high; copy → copy_text; ttl "keep" → far-future expiry', () => {
+    expect(pageArgsToPayload({ title: 'T', html: '<p>x</p>', high: true }, {}).priority).toBe('high');
+    expect(pageArgsToPayload({ title: 'T', html: '<p>x</p>', copy: 'paste' }, {}).copy_text).toBe('paste');
+    expect(pageArgsToPayload({ title: 'T', html: '<p>x</p>', ttl: 'keep' }, {}).expires_at).toBe('9999-12-31T23:59:59.999Z');
+  });
+
+  test('throws without a title or without html', () => {
+    expect(() => pageArgsToPayload({ html: '<p>x</p>' }, {})).toThrow(/title/);
+    expect(() => pageArgsToPayload({ title: 'T' }, {})).toThrow(/html/);
+  });
+});
+
+describe('buildPagePayload', () => {
+  test('produces a kind:page payload with page_html and no buttons', () => {
+    const p = buildPagePayload({ title: 'T', pageHtml: '<p>hi</p>' });
+    expect(p.kind).toBe('page');
+    expect(p.page_html).toBe('<p>hi</p>');
+    expect(p.buttons).toEqual([]);
+  });
+
+  test('throws without a title or without pageHtml', () => {
+    expect(() => buildPagePayload({ pageHtml: '<p>x</p>' })).toThrow(/title/);
+    expect(() => buildPagePayload({ title: 'T' })).toThrow(/html/);
+  });
+});
+
 describe('formatResponse', () => {
   test('an approved verdict formats as answered', () => {
     const r = formatResponse({ status: 'responded', response: { verdict: 'approved', action: 'approved', note: null } }, 'id1');
@@ -132,9 +171,9 @@ describe('formatResponse', () => {
 });
 
 describe('TOOL_DEFS', () => {
-  test('exposes the five relay tools, each with a description and input schema', () => {
+  test('exposes the six relay tools, each with a description and input schema', () => {
     const names = TOOL_DEFS.map((t: any) => t.name).sort();
-    expect(names).toEqual(['relay_ask', 'relay_card', 'relay_choice', 'relay_notify', 'relay_poll']);
+    expect(names).toEqual(['relay_ask', 'relay_card', 'relay_choice', 'relay_notify', 'relay_page', 'relay_poll']);
     for (const t of TOOL_DEFS) {
       expect(typeof t.description).toBe('string');
       expect(t.description.length).toBeGreaterThan(20);
@@ -142,10 +181,11 @@ describe('TOOL_DEFS', () => {
     }
   });
 
-  test('relay_card and relay_ask require a title; relay_poll requires an id', () => {
+  test('relay_card and relay_ask require a title; relay_poll requires an id; relay_page requires title+html', () => {
     const byName = Object.fromEntries(TOOL_DEFS.map((t: any) => [t.name, t]));
     expect(byName.relay_card.inputSchema.required).toContain('title');
     expect(byName.relay_ask.inputSchema.required).toContain('title');
     expect(byName.relay_poll.inputSchema.required).toContain('id');
+    expect(byName.relay_page.inputSchema.required).toEqual(['title', 'html']);
   });
 });

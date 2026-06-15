@@ -1,0 +1,60 @@
+<!doctype html>
+<!-- Relay page template: 3d. Sandboxed (allow-scripts), opaque origin: no Relay/network-back, no localStorage, alert() is a no-op. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>3D Scene</title>
+  <style>html,body{background:#1a1b1e;color:#e9ecef;margin:0;overflow:hidden}canvas{display:block}</style>
+  <script type="importmap">
+    {"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js"}}
+  </script>
+</head>
+<body>
+  <!-- On-screen error overlay (alert() is muted in the sandbox). Registered before other scripts. -->
+  <div id="err" style="display:none;position:fixed;left:0;right:0;bottom:0;background:#5c1f1f;color:#fff;padding:8px 12px;font:13px monospace;white-space:pre-wrap;z-index:9999"></div>
+  <script>addEventListener("error",function(e){var d=document.getElementById("err");d.style.display="block";d.textContent="⚠ "+(e.message||"script error")});</script>
+
+  <script type="module">
+    import * as THREE from "three";
+
+    var renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    document.body.appendChild(renderer.domElement);
+
+    var scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x1a1b1e);
+
+    var camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 100);
+    camera.position.set(0, 0, 4);
+
+    // Lighting
+    scene.add(new THREE.AmbientLight(0xffffff, 0.4));
+    var key = new THREE.DirectionalLight(0xffffff, 1.2);
+    key.position.set(3, 4, 5);
+    scene.add(key);
+
+    // TODO: replace this mesh with your scene contents.
+    var geometry = new THREE.BoxGeometry(1.5, 1.5, 1.5);
+    var material = new THREE.MeshStandardMaterial({ color: 0x4dabf7, metalness: 0.3, roughness: 0.4 });
+    var mesh = new THREE.Mesh(geometry, material);
+    scene.add(mesh);
+    // end TODO
+
+    function animate() {
+      requestAnimationFrame(animate);
+      mesh.rotation.x += 0.01;
+      mesh.rotation.y += 0.013;
+      renderer.render(scene, camera);
+    }
+    animate();
+
+    window.addEventListener("resize", function () {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+  </script>
+</body>
+</html>

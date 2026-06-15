@@ -1,0 +1,58 @@
+<!doctype html>
+<!-- Relay page template: chart. Sandboxed (allow-scripts), opaque origin: no Relay/network-back, no localStorage, alert() is a no-op. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Chart</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    html,body{background:#1a1b1e;color:#e9ecef;margin:0;font-family:system-ui,sans-serif}
+    .wrap{max-width:720px;margin:0 auto;padding:24px 16px}
+    h1{font-size:20px;margin:0 0 16px}
+    .card{background:#25262b;border:1px solid #373a40;border-radius:12px;padding:16px}
+  </style>
+</head>
+<body>
+  <!-- On-screen error overlay (alert() is muted in the sandbox). Registered before other scripts. -->
+  <div id="err" style="display:none;position:fixed;left:0;right:0;bottom:0;background:#5c1f1f;color:#fff;padding:8px 12px;font:13px monospace;white-space:pre-wrap;z-index:9999"></div>
+  <script>addEventListener("error",function(e){var d=document.getElementById("err");d.style.display="block";d.textContent="⚠ "+(e.message||"script error")});</script>
+
+  <div class="wrap">
+    <h1>Sample Bar Chart</h1>
+    <div class="card"><canvas id="chart"></canvas></div>
+  </div>
+
+  <script>
+    // Dark-theme defaults so axes/legend read well on #1a1b1e.
+    Chart.defaults.color = "#adb5bd";
+    Chart.defaults.borderColor = "#373a40";
+
+    // TODO: replace labels + data with your dataset.
+    var labels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+    var data = [12, 19, 7, 15, 22, 9, 14];
+    // end TODO
+
+    new Chart(document.getElementById("chart"), {
+      type: "bar",
+      data: {
+        labels: labels,
+        datasets: [{
+          label: "Value",
+          data: data,
+          backgroundColor: "#4dabf7",
+          borderRadius: 4
+        }]
+      },
+      options: {
+        responsive: true,
+        plugins: { legend: { labels: { color: "#e9ecef" } } },
+        scales: {
+          x: { grid: { color: "#2c2e33" }, ticks: { color: "#adb5bd" } },
+          y: { grid: { color: "#2c2e33" }, ticks: { color: "#adb5bd" }, beginAtZero: true }
+        }
+      }
+    });
+  </script>
+</body>
+</html>

@@ -459,6 +459,27 @@ export function buildChoicePayload({ title, body = null, options = [], priority 
   };
 }
 
+// Pure: assemble a 'page' card payload — a full agent-authored HTML+JS document rendered in a
+// sandboxed iframe on the Relay web app. page_html is a TOP-LEVEL key (the server's validateCardInput
+// reads b.page_html and createCard INSERTs it). No buttons/options: a page is view-only, not
+// responded to. Throws without a title or pageHtml. There is no CLI `relay page` command — this
+// builder exists so the MCP server (relay_page) shares the same tested payload shape.
+export function buildPagePayload({ title, pageHtml, copyText = null, priority = 'normal', push = true, expiresAt = null, source = {} }) {
+  if (!title) throw new Error('relay page: title is required');
+  if (!pageHtml) throw new Error('relay page: html is required');
+  return {
+    kind: 'page',
+    title,
+    page_html: pageHtml,
+    copy_text: copyText,
+    buttons: [],
+    priority,
+    push,
+    source,
+    ...(expiresAt ? { expires_at: expiresAt } : {}),
+  };
+}
+
 async function cmdCard(cfg, flags) {
   const kind = typeof flags.kind === 'string' ? flags.kind : 'note';
   let body = typeof flags.body === 'string' ? flags.body : null;

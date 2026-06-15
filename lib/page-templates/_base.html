@@ -1,0 +1,27 @@
+<!doctype html>
+<!-- Relay page template: _base. Sandboxed (allow-scripts), opaque origin: no Relay/network-back, no localStorage, alert() is a no-op. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Relay Page</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>html,body{background:#1a1b1e;color:#e9ecef}</style>
+</head>
+<body class="min-h-screen antialiased">
+  <!-- On-screen error overlay (alert() is muted in the sandbox). Registered before other scripts. -->
+  <div id="err" style="display:none;position:fixed;left:0;right:0;bottom:0;background:#5c1f1f;color:#fff;padding:8px 12px;font:13px monospace;white-space:pre-wrap;z-index:9999"></div>
+  <script>addEventListener("error",function(e){var d=document.getElementById("err");d.style.display="block";d.textContent="⚠ "+(e.message||"script error")});</script>
+
+  <main class="max-w-2xl mx-auto px-4 py-8">
+    <!-- TODO: replace this region with your content/data -->
+    <h1 class="text-2xl font-semibold mb-3">Hello from Relay</h1>
+    <p class="text-[#adb5bd] leading-relaxed">
+      This is the minimal page shell. Edit the TODO region above to build your
+      page. Tailwind utility classes are available, and any uncaught error will
+      surface in the red overlay at the bottom of the screen.
+    </p>
+    <!-- end TODO -->
+  </main>
+</body>
+</html>
