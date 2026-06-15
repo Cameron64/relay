@@ -109,7 +109,7 @@ const MIME = {
 
 // --- button spec parser (exported for tests) -------------------------------
 // "Label=action[:style]" -> respond button. Friendly action aliases map to verdicts.
-const VERDICT_ALIAS = { approve: 'approved', approved: 'approved', changes: 'changes_requested', 'request-changes': 'changes_requested', changes_requested: 'changes_requested', dismiss: 'dismissed', dismissed: 'dismissed', reject: 'dismissed' };
+export const VERDICT_ALIAS = { approve: 'approved', approved: 'approved', changes: 'changes_requested', 'request-changes': 'changes_requested', changes_requested: 'changes_requested', dismiss: 'dismissed', dismissed: 'dismissed', reject: 'dismissed' };
 
 export function parseButtonSpec(spec) {
   const eq = spec.indexOf('=');
@@ -404,6 +404,61 @@ async function cmdNotify(cfg, flags) {
   process.exit(res.status === 503 ? 0 : 1);
 }
 
+// Pure: assemble a card payload object from already-resolved inputs. cmdCard does the fs/stdin/flag
+// work (reading images, parsing button specs, adding the copy + approval-default buttons) and passes
+// the finished pieces in; the MCP server (bin/relay-mcp.mjs) builds its own pieces from structured
+// tool args and calls this for the exact same payload shape. effectiveKind promotes a plain note to
+// 'diagram' (mermaid present) or 'image' (assets present). Throws without a title.
+export function buildCardPayload({
+  title,
+  body = null,
+  kind = 'note',
+  buttons = [],
+  copyText = null,
+  mermaid = null,
+  assets = [],
+  priority = 'normal',
+  push = true,
+  expiresAt = null,
+  source = {},
+  pushBody = null,
+}) {
+  if (!title) throw new Error('relay card: --title is required');
+  const effectiveKind = mermaid && kind === 'note' ? 'diagram' : assets.length && kind === 'note' ? 'image' : kind;
+  return {
+    kind: effectiveKind,
+    title,
+    body,
+    buttons,
+    copy_text: copyText,
+    mermaid,
+    priority,
+    push,
+    source,
+    ...(expiresAt ? { expires_at: expiresAt } : {}),
+    ...(assets.length ? { assets } : {}),
+    ...(pushBody != null ? { pushBody } : {}),
+  };
+}
+
+// Pure: assemble a choice card payload. cmdChoice parses/validates options first; the MCP server
+// maps structured options. Throws without a title or with no options.
+export function buildChoicePayload({ title, body = null, options = [], priority = 'normal', push = true, expiresAt = null, source = {} }) {
+  if (!title) throw new Error('relay choice: --title is required');
+  if (!Array.isArray(options) || options.length === 0) throw new Error('relay choice: at least one option is required');
+  return {
+    kind: 'choice',
+    title,
+    body,
+    options,
+    buttons: [],
+    priority,
+    push,
+    source,
+    ...(expiresAt ? { expires_at: expiresAt } : {}),
+  };
+}
+
 async function cmdCard(cfg, flags) {
   const kind = typeof flags.kind === 'string' ? flags.kind : 'note';
   let body = typeof flags.body === 'string' ? flags.body : null;
@@ -452,21 +507,20 @@ async function cmdCard(cfg, flags) {
     expiresAt = new Date(Date.now() + ms).toISOString();
   }
 
-  const effectiveKind = mermaid && kind === 'note' ? 'diagram' : assets.length && kind === 'note' ? 'image' : kind;
-  const payload = {
-    kind: effectiveKind,
+  const payload = buildCardPayload({
     title,
     body,
+    kind,
     buttons,
-    copy_text: copyText,
+    copyText,
     mermaid,
+    assets,
     priority: flags.high ? 'high' : 'normal',
     push: flags['no-push'] ? false : true,
+    expiresAt,
     source: { cwd: process.cwd(), host: process.env.COMPUTERNAME || process.env.HOSTNAME || null },
-    ...(expiresAt ? { expires_at: expiresAt } : {}),
-    ...(assets.length ? { assets } : {}),
-    ...(typeof flags['push-body'] === 'string' ? { pushBody: flags['push-body'] } : {}),
-  };
+    pushBody: typeof flags['push-body'] === 'string' ? flags['push-body'] : null,
+  });
 
   // --open auto-opens the desktop browser to the card (what /show uses); --wait blocks for a verdict.
   return createAndWait(cfg, payload, flags, 'card');
@@ -504,17 +558,15 @@ async function cmdChoice(cfg, flags) {
     expiresAt = new Date(Date.now() + ms).toISOString();
   }
 
-  const payload = {
-    kind: 'choice',
+  const payload = buildChoicePayload({
     title,
     body,
     options,
-    buttons: [],
     priority: flags.high ? 'high' : 'normal',
     push: flags['no-push'] ? false : true,
+    expiresAt,
     source: { cwd: process.cwd(), host: process.env.COMPUTERNAME || process.env.HOSTNAME || null },
-    ...(expiresAt ? { expires_at: expiresAt } : {}),
-  };
+  });
   return createAndWait(cfg, payload, flags, 'choice');
 }
 

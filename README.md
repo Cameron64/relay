@@ -160,6 +160,35 @@ your phone; auto-open is on — pass `--no-open` for automation/headless callers
 client-side only (copy is the action; nothing is saved back). Respond buttons aren't supported on
 drafts in v1; `--link` adds plain link buttons.
 
+## MCP server (`bin/relay-mcp.mjs`)
+
+A [Model Context Protocol](https://modelcontextprotocol.io) stdio server that exposes Relay as
+**native tools** for any MCP client (Claude Code, Claude Desktop, IDE extensions) — so an agent can
+call them with structured args instead of shelling out to the CLI and escaping markdown/Mermaid by
+hand. It's a thin **local client** of the deployed API: it reads the same `~/.relay/config.json`
+(URL + write token) and calls the same `/api` endpoints. No backend change; the CLI, hooks, and the
+`/relay` skill keep working unchanged.
+
+Register it (point at the file in your checkout):
+
+```bash
+claude mcp add relay -- node "C:/Users/Cam Dowdle/source/repos/personal/relay/bin/relay-mcp.mjs"
+```
+
+| Tool | Blocks? | Purpose |
+|---|---|---|
+| `relay_notify` | no | fire-and-forget push |
+| `relay_card` | optional (`waitSeconds`) | post a note / approval / diagram card; block for a verdict |
+| `relay_ask` | yes (default 50s) | open-ended question → free-text reply |
+| `relay_choice` | yes (default 50s) | pick one of several options |
+| `relay_poll` | yes (default 50s) | resume waiting on a card that returned `pending` |
+
+Blocking tools poll for a bounded window (`waitSeconds`, ≤ 280) that stays under the MCP client's
+per-call timeout (`MCP_TIMEOUT`); if no answer lands they return `{"status":"pending","id":…}` and
+the agent calls `relay_poll` with that id — the same bounded-poll / re-poll pattern the CLI uses.
+Each result is one JSON object in the tool's text content. Built on `lib/relay-client.mjs` (a shared,
+side-effect-free HTTP client) plus the CLI's payload builders, so tool output matches the CLI's.
+
 ## Claude Code hooks
 
 Two hooks (in `hooks/`) make the phone ping automatic. They are **inert until
