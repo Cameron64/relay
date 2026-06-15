@@ -10,6 +10,12 @@ export type PushPayload = {
   body: string;
   url?: string; // where notificationclick takes the user (default '/')
   tag?: string; // collapse key — a later notification with the same tag replaces the earlier
+  cardId?: string; // lets the SW respond/ack in the background when an action button is tapped
+  // Up to 2 tappable action buttons (Chrome/Android max). `action` is the card button id; the SW
+  // POSTs it to /respond on tap. More than 2 are silently dropped by the platform.
+  actions?: { action: string; title: string }[];
+  requireInteraction?: boolean; // keep the notification up until the user acts (high priority)
+  urgency?: 'very-low' | 'low' | 'normal' | 'high'; // Web Push delivery hint (RFC 8030)
 };
 
 let configured: boolean | null = null;
@@ -62,7 +68,15 @@ export async function sendToSubscriptions(
     body: payload.body,
     url: payload.url ?? '/',
     tag: payload.tag ?? 'relay',
+    ...(payload.cardId ? { cardId: payload.cardId } : {}),
+    ...(payload.actions && payload.actions.length ? { actions: payload.actions.slice(0, 2) } : {}),
+    ...(payload.requireInteraction ? { requireInteraction: true } : {}),
   });
+
+  const options: { TTL: number; urgency?: 'very-low' | 'low' | 'normal' | 'high' } = {
+    TTL: 60 * 60 * 24, // hold up to 24h if the device is offline
+  };
+  if (payload.urgency) options.urgency = payload.urgency;
 
   const result: SendResult = { sent: 0, failed: 0, expiredEndpoints: [] };
 
@@ -72,7 +86,7 @@ export async function sendToSubscriptions(
         await webpush.sendNotification(
           { endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth } },
           data,
-          { TTL: 60 * 60 * 24 }, // hold up to 24h if the device is offline
+          options,
         );
         result.sent++;
       } catch (error) {

@@ -35,7 +35,9 @@ self.addEventListener('fetch', (event) => {
 });
 
 // --- Web Push -------------------------------------------------------------
-// Payload JSON sent by the server: { title, body, url, tag }.
+// Payload JSON sent by the server: { title, body, url, tag, cardId?, actions?, requireInteraction? }.
+// `actions` (max 2 on Chrome/Android) render as tappable buttons; a tap on one is handled in
+// notificationclick below — it POSTs the button id to /respond WITHOUT opening the app.
 self.addEventListener('push', (event) => {
   let data = {};
   try {
@@ -44,6 +46,7 @@ self.addEventListener('push', (event) => {
     data = { body: event.data ? event.data.text() : '' };
   }
   const title = data.title || 'Relay';
+  const actions = Array.isArray(data.actions) ? data.actions.slice(0, 2) : [];
   event.waitUntil(
     self.registration.showNotification(title, {
       body: data.body || '',
@@ -51,24 +54,62 @@ self.addEventListener('push', (event) => {
       badge: '/icons/icon-192.png',
       tag: data.tag || 'relay',
       renotify: true,
-      data: { url: data.url || '/' },
+      requireInteraction: !!data.requireInteraction,
+      data: { url: data.url || '/', cardId: data.cardId || null },
+      ...(actions.length ? { actions } : {}),
+      ...(data.requireInteraction ? { vibrate: [200, 100, 200] } : {}),
     }),
   );
 });
 
 // Focus an existing app window (navigating it to the target) or open a new one.
+function openOrFocus(target) {
+  return self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clients) => {
+    for (const client of clients) {
+      if ('focus' in client) {
+        if ('navigate' in client) client.navigate(target);
+        return client.focus();
+      }
+    }
+    return self.clients.openWindow(target);
+  });
+}
+
+// Tap on an action button: POST the verdict to /respond in the background (same-origin fetch sends
+// the httpOnly relay_session cookie). On success — or if it was already answered — quietly update
+// the notification in place. If the device isn't unlocked (401) or the request fails, fall back to
+// opening the app at the card so the user can respond there.
+async function respondInBackground(cardId, action, url) {
+  try {
+    const res = await fetch(`/api/cards/${cardId}/respond`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify({ action }),
+    });
+    if (res.ok || res.status === 409) {
+      await self.registration.showNotification('Relay', {
+        body: 'Response sent ✓',
+        icon: '/icons/icon-192.png',
+        badge: '/icons/icon-192.png',
+        tag: cardId,
+        silent: true,
+      });
+      return;
+    }
+  } catch {
+    /* fall through to opening the app */
+  }
+  return openOrFocus(url);
+}
+
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
-  const target = (event.notification.data && event.notification.data.url) || '/';
-  event.waitUntil(
-    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clients) => {
-      for (const client of clients) {
-        if ('focus' in client) {
-          if ('navigate' in client) client.navigate(target);
-          return client.focus();
-        }
-      }
-      return self.clients.openWindow(target);
-    }),
-  );
+  const d = event.notification.data || {};
+  const target = d.url || '/';
+  if (event.action && d.cardId) {
+    event.waitUntil(respondInBackground(d.cardId, event.action, target));
+    return;
+  }
+  event.waitUntil(openOrFocus(target));
 });

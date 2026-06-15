@@ -99,6 +99,14 @@ appRoutes.post('/cards', requireWrite, async (c) => {
   const wantPush = body.push !== false;
   let push: unknown = null;
   if (wantPush && isPushConfigured()) {
+    // Surface respond buttons as notification action buttons (Chrome/Android shows up to 2) so the
+    // user can answer straight from the notification — the SW POSTs the tapped button id to
+    // /respond in the background. High-priority cards get a delivery-urgency hint + requireInteraction.
+    const actions = card.buttons
+      .filter((b) => b.behavior === 'respond')
+      .slice(0, 2)
+      .map((b) => ({ action: b.id, title: b.label }));
+    const high = card.priority === 'high';
     try {
       push = await sendPushToAll({
         title: card.title,
@@ -110,6 +118,9 @@ appRoutes.post('/cards', requireWrite, async (c) => {
               : 'Tap to view',
         url: '/?card=' + card.id,
         tag: card.id,
+        cardId: card.id,
+        ...(actions.length ? { actions } : {}),
+        ...(high ? { urgency: 'high' as const, requireInteraction: true } : {}),
       });
     } catch (err) {
       console.error('[cards] push failed:', err);
