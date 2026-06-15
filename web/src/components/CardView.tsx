@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
-import { Badge, Card as MCard, Group, Text, Title } from '@mantine/core';
+import { ActionIcon, Badge, Card as MCard, Group, Text, Title } from '@mantine/core';
 import { useFeed } from '../store/feed';
+import { dismiss } from '../api';
 import { claimFocus } from '../utils/focus';
 import { timeAgo } from '../utils/markdown';
 import { Markdown } from './cards/Markdown';
@@ -14,7 +15,15 @@ import type { Card } from '../types';
 export function CardView({ card }: { card: Card }) {
   const ref = useRef<HTMLDivElement>(null);
   const flash = useFeed((s) => s.flashIds.has(card.id));
+  const removeCard = useFeed((s) => s.remove);
   const [autoFocusEditor, setAutoFocusEditor] = useState(false);
+
+  // Dismiss: optimistically drop the card now, then tell the server (which broadcasts card-removed
+  // to any other open tabs). No undo in v1 — the card is gone.
+  const onDismiss = () => {
+    removeCard(card.id);
+    void dismiss(card.id);
+  };
 
   // Deep-link ?card=<id>: scroll + flash + (editable draft) focus, exactly once per session.
   useEffect(() => {
@@ -57,9 +66,16 @@ export function CardView({ card }: { card: Card }) {
             </Badge>
           ) : null}
         </Group>
-        <Text size="xs" c="dimmed" style={{ whiteSpace: 'nowrap' }}>
-          {timeAgo(card.created_at)}
-        </Text>
+        <Group gap={4} align="center" wrap="nowrap">
+          <Text size="xs" c="dimmed" style={{ whiteSpace: 'nowrap' }}>
+            {timeAgo(card.created_at)}
+          </Text>
+          <ActionIcon variant="subtle" color="gray" size="sm" aria-label="Dismiss card" onClick={onDismiss}>
+            <span aria-hidden style={{ fontSize: 18, lineHeight: 1 }}>
+              ×
+            </span>
+          </ActionIcon>
+        </Group>
       </Group>
 
       {/* non-draft image assets (editable drafts render their own with per-asset copy buttons) */}

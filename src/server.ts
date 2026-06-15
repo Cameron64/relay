@@ -4,7 +4,8 @@ import { existsSync } from 'node:fs';
 import { pushRoutes } from './routes-push.ts';
 import { appRoutes } from './routes-cards.ts';
 import { store } from './store.ts';
-import { ensureCardsSchema } from './cards-store.ts';
+import { ensureCardsSchema, cardsReady, sweepExpired } from './cards-store.ts';
+import { broadcast } from './stream.ts';
 
 // Initialize the subscription store (idempotent, non-fatal — see store.ts).
 await store.ensureSchema();
@@ -42,6 +43,23 @@ try {
 
 app.route('/api', pushRoutes); // -> /api/push/*, /api/notify
 app.route('/api', appRoutes); // -> /api/unlock, /api/stream, /api/cards/*
+
+// --- expiry sweep -----------------------------------------------------------
+// Cards carry an expires_at (explicit --ttl, or a kind-based default — see cards-store.ts). This
+// interval deletes any that have lapsed and broadcasts card-removed so open tabs drop them live.
+// Unref'd so it never keeps the process alive on its own (the server's listener does that).
+const SWEEP_MS = Number(process.env.CARD_SWEEP_MS ?? 60_000);
+if (SWEEP_MS > 0) {
+  const timer = setInterval(() => {
+    if (!cardsReady()) return;
+    try {
+      for (const id of sweepExpired()) void broadcast('card-removed', { id });
+    } catch (err) {
+      console.error('[relay] expiry sweep failed:', err);
+    }
+  }, SWEEP_MS);
+  (timer as { unref?: () => void }).unref?.();
+}
 
 // --- PWA control files ------------------------------------------------------
 // Served explicitly (not via serveStatic) so we can set the headers a PWA needs:

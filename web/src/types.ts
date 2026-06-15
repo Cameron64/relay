@@ -42,7 +42,8 @@ export interface Card {
   buttons?: CardButton[];
   mermaid?: string | null;
   copy_text?: string | null;
-  status: 'pending' | 'responded';
+  status: 'pending' | 'responded' | 'dismissed';
   response?: CardResponse | null;
   created_at: string;
+  expires_at?: string | null;
 }

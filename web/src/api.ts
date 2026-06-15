@@ -67,3 +67,14 @@ export async function respond(cardId: string, action: string, note: string | nul
   const d = await res.json().catch(() => ({}));
   return { status: 'ok', response: d.response };
 }
+
+// Clear a card from the feed. Fire-and-forget from the UI's perspective: the optimistic local
+// remove already happened, and a card-removed SSE will reconcile other tabs.
+export async function dismiss(cardId: string): Promise<boolean> {
+  try {
+    const res = await api(`/api/cards/${cardId}/dismiss`, { method: 'POST' });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}

@@ -64,6 +64,29 @@ export const VALID_BEHAVIORS = ['respond', 'copy', 'link'];
 export const VALID_STYLES = ['primary', 'secondary', 'outline', 'danger', 'note'];
 export const VALID_VERDICTS = ['approved', 'changes_requested', 'dismissed'];
 
+// --- expiry / decluttering -------------------------------------------------
+// Cards shouldn't live in the feed forever. Three rules, all leaning on the existing expires_at
+// column (which was stored but never enforced before):
+//   1. Non-actionable cards (note/diagram/image/draft) auto-expire CARD_TTL_HOURS after creation
+//      unless the caller passed an explicit expires_at.
+//   2. Actionable cards (approval/choice) get NO default expiry while pending — they wait for a
+//      human, then rule 3 takes over.
+//   3. Once a card is answered (respond) or dismissed, its expiry is pulled in to a short grace
+//      window (CARD_ANSWERED_TTL_HOURS) so resolved cards clear out of the feed soon after.
+// A periodic sweepExpired() (see server.ts) deletes expired rows and tells live clients to drop
+// them. NOTE on time comparisons: expires_at/created_at are stored via toISOString() (T/Z format),
+// so we ALWAYS compare against a JS ISO string ($now), never SQLite's space-format datetime('now')
+// — mixing the two compares 'T'(0x54) vs ' '(0x20) and silently inverts the ordering.
+const CARD_TTL_HOURS = Number(process.env.CARD_TTL_HOURS ?? 24);
+const CARD_ANSWERED_TTL_HOURS = Number(process.env.CARD_ANSWERED_TTL_HOURS ?? 6);
+const NO_DEFAULT_EXPIRY_KINDS = new Set(['approval', 'choice']);
+
+function defaultExpiryFor(kind: string, createdAtIso: string): string | null {
+  if (NO_DEFAULT_EXPIRY_KINDS.has(kind)) return null;
+  if (!(CARD_TTL_HOURS > 0)) return null;
+  return new Date(Date.parse(createdAtIso) + CARD_TTL_HOURS * 3_600_000).toISOString();
+}
+
 type Ok<T> = { ok: true; value: T };
 type Err = { ok: false; error: string };
 
@@ -226,7 +249,7 @@ export function createCard(value: CardInput, assets: { mime: string; bytes: Uint
       $mermaid: value.mermaid ?? null,
       $source: value.source ? JSON.stringify(value.source) : null,
       $priority: value.priority || 'normal',
-      $expires: value.expires_at ?? null,
+      $expires: value.expires_at ?? defaultExpiryFor(value.kind, now),
     });
     for (const a of assets) {
       db.query('INSERT INTO card_assets (id, card_id, mime, bytes, created_at) VALUES ($id, $cid, $mime, $bytes, $created)').run({
@@ -250,11 +273,16 @@ export function getCard(id: string): Card | null {
 
 export function listCards(opts: { since?: string; limit?: number } = {}): Card[] {
   const limit = Math.min(Math.max(opts.limit ?? 100, 1), 200);
+  const now = new Date().toISOString();
+  // Live = not dismissed and not past its expiry. (expires_at compared ISO-to-ISO; see note above.)
+  const live = "status != 'dismissed' AND (expires_at IS NULL OR expires_at > $now)";
   const rows = opts.since
     ? (db
-        .query('SELECT * FROM cards WHERE created_at > $since ORDER BY created_at DESC, id DESC LIMIT $lim')
-        .all({ $since: opts.since, $lim: limit }) as any[])
-    : (db.query('SELECT * FROM cards ORDER BY created_at DESC, id DESC LIMIT $lim').all({ $lim: limit }) as any[]);
+        .query(`SELECT * FROM cards WHERE created_at > $since AND ${live} ORDER BY created_at DESC, id DESC LIMIT $lim`)
+        .all({ $since: opts.since, $now: now, $lim: limit }) as any[])
+    : (db
+        .query(`SELECT * FROM cards WHERE ${live} ORDER BY created_at DESC, id DESC LIMIT $lim`)
+        .all({ $now: now, $lim: limit }) as any[]);
   return rows.map(hydrate);
 }
 
@@ -272,11 +300,23 @@ export function respondCard(id: string, input: { action: string; note?: string |
     const btn = buttons.find((b) => b.id === input.action);
     const verdict = btn?.verdict ?? input.action;
     const response: CardResponse = { verdict, action: input.action, note: input.note ?? null, at: new Date().toISOString() };
-    db.query("UPDATE cards SET status = 'responded', response = $r, responded_at = $t WHERE id = $id").run({
-      $r: JSON.stringify(response),
-      $t: response.at,
-      $id: id,
-    });
+    // Pull resolved cards into a short grace window so they clear out of the feed soon after the
+    // user acts (rule 3). When the grace window is disabled (0), leave expires_at untouched.
+    if (CARD_ANSWERED_TTL_HOURS > 0) {
+      const exp = new Date(Date.now() + CARD_ANSWERED_TTL_HOURS * 3_600_000).toISOString();
+      db.query("UPDATE cards SET status = 'responded', response = $r, responded_at = $t, expires_at = $e WHERE id = $id").run({
+        $r: JSON.stringify(response),
+        $t: response.at,
+        $e: exp,
+        $id: id,
+      });
+    } else {
+      db.query("UPDATE cards SET status = 'responded', response = $r, responded_at = $t WHERE id = $id").run({
+        $r: JSON.stringify(response),
+        $t: response.at,
+        $id: id,
+      });
+    }
     return { status: 'responded', response };
   });
   return tx();
@@ -289,6 +329,36 @@ export function getAsset(cardId: string, assetId: string): { mime: string; bytes
   }) as any;
   if (!row) return null;
   return { mime: row.mime, bytes: row.bytes as Uint8Array };
+}
+
+/** Mark a card dismissed and expire it immediately so it drops from the feed and is swept. */
+export function dismissCard(id: string): boolean {
+  const now = new Date().toISOString();
+  const res = db
+    .query("UPDATE cards SET status = 'dismissed', expires_at = $now WHERE id = $id")
+    .run({ $now: now, $id: id });
+  return res.changes > 0;
+}
+
+/**
+ * Delete every card whose expiry has passed and return their ids (so the caller can broadcast a
+ * `card-removed` to live clients). Run on an interval from server.ts. Compares ISO-to-ISO; see the
+ * time-comparison note near the TTL constants.
+ */
+export function sweepExpired(): string[] {
+  const now = new Date().toISOString();
+  const rows = db
+    .query('SELECT id FROM cards WHERE expires_at IS NOT NULL AND expires_at <= $now')
+    .all({ $now: now }) as { id: string }[];
+  const ids = rows.map((r) => r.id);
+  if (ids.length) {
+    const tx = db.transaction(() => {
+      db.query('DELETE FROM cards WHERE expires_at IS NOT NULL AND expires_at <= $now').run({ $now: now });
+      db.query('DELETE FROM card_assets WHERE card_id NOT IN (SELECT id FROM cards)').run();
+    });
+    tx();
+  }
+  return ids;
 }
 
 export function pruneCards(): void {

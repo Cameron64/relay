@@ -8,6 +8,7 @@
 //   GET  /api/cards                   feed, newest first                       (UI)
 //   GET  /api/cards/:id               one card                                 (UI)
 //   POST /api/cards/:id/respond       record verdict, resolve --wait + SSE     (UI)
+//   POST /api/cards/:id/dismiss       clear a card from the feed               (UI)
 //   GET  /api/cards/:id/response      long-poll the verdict (?wait=N)          (write)
 //   GET  /api/cards/:id/asset/:aid    image bytes                              (UI)
 
@@ -162,6 +163,17 @@ appRoutes.post('/cards/:id/respond', requireUi, async (c) => {
   const card = cards.getCard(id);
   await broadcast('card-updated', card);
   return c.json({ ok: true, response: result.response });
+});
+
+// --- dismiss (UI side) -----------------------------------------------------
+// Clear a card from the feed (a swipe / × in the UI). Idempotent: dismissing an unknown or
+// already-gone card still returns ok. Broadcasts card-removed so other open tabs drop it too.
+appRoutes.post('/cards/:id/dismiss', requireUi, async (c) => {
+  if (!cards.cardsReady()) return notReady(c);
+  const id = c.req.param('id') as string;
+  cards.dismissCard(id);
+  await broadcast('card-removed', { id });
+  return c.json({ ok: true });
 });
 
 // --- long-poll the verdict (Claude side) -----------------------------------

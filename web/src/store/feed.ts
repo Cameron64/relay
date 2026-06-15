@@ -12,6 +12,7 @@ interface FeedState {
   flashIds: Set<string>;
   upsert: (card: Card, opts?: { flash?: boolean }) => void;
   applyResolved: (id: string, response: CardResponse) => void;
+  remove: (id: string) => void;
   clearFlash: (id: string) => void;
   clear: () => void;
 }
@@ -42,6 +43,18 @@ export const useFeed = create<FeedState>((set) => ({
     set((s) => ({
       cards: s.cards.map((c) => (c.id === id ? { ...c, status: 'responded' as const, response } : c)),
     })),
+
+  // Drop a card from the feed (dismissed or expired). Also clears any pending flash for it.
+  remove: (id) =>
+    set((s) => {
+      if (!s.cards.some((c) => c.id === id)) return {} as Partial<FeedState>;
+      let flashIds = s.flashIds;
+      if (s.flashIds.has(id)) {
+        flashIds = new Set(s.flashIds);
+        flashIds.delete(id);
+      }
+      return { cards: s.cards.filter((c) => c.id !== id), flashIds };
+    }),
 
   clearFlash: (id) =>
     set((s) => {

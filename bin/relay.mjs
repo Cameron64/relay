@@ -24,7 +24,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // Returns { _: positionals, flags: {...} }. Repeatable flags (image/button/link) collect
 // into arrays. `--flag=value`, `--flag value`, and bare booleans all supported.
 const REPEATABLE = new Set(['image', 'button', 'link']);
-const BOOLEANS = new Set(['body-stdin', 'copy-stdin', 'high', 'push', 'no-push', 'open', 'no-open']);
+const BOOLEANS = new Set(['body-stdin', 'copy-stdin', 'high', 'push', 'no-push', 'open', 'no-open', 'keep']);
 
 function parseArgs(argv) {
   const _ = [];
@@ -75,6 +75,14 @@ function requireConfig() {
       `relay is not configured. Run:\n  relay init --url <https://your-app.up.railway.app> --token <WRITE_TOKEN>\n(or set RELAY_URL and RELAY_WRITE_TOKEN). Config path: ${configPath()}`,
     );
   return cfg;
+}
+
+// "30m" / "2h" / "1d" / bare "45" (minutes) -> milliseconds. Returns null on a bad spec.
+const TTL_UNITS = { s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 };
+export function parseTtl(spec) {
+  const m = String(spec).trim().match(/^(\d+)\s*([smhd])?$/i);
+  if (!m) return null;
+  return parseInt(m[1], 10) * TTL_UNITS[(m[2] || 'm').toLowerCase()];
 }
 
 const MIME = {
@@ -310,6 +318,17 @@ async function cmdCard(cfg, flags) {
     assets.push({ mime, data: buf.toString('base64') });
   }
 
+  // Expiry: --ttl sets an explicit lifetime; --keep opts out (far-future); otherwise omit and let
+  // the server apply its kind-based default (notes expire, approvals persist until answered).
+  let expiresAt = null;
+  if (flags.keep) {
+    expiresAt = '9999-12-31T23:59:59.999Z';
+  } else if (flags.ttl !== undefined) {
+    const ms = parseTtl(flags.ttl);
+    if (ms == null) die(`relay card: bad --ttl "${flags.ttl}" (use e.g. 30m, 2h, 1d)`);
+    expiresAt = new Date(Date.now() + ms).toISOString();
+  }
+
   const effectiveKind = mermaid && kind === 'note' ? 'diagram' : assets.length && kind === 'note' ? 'image' : kind;
   const payload = {
     kind: effectiveKind,
@@ -321,6 +340,7 @@ async function cmdCard(cfg, flags) {
     priority: flags.high ? 'high' : 'normal',
     push: flags['no-push'] ? false : true,
     source: { cwd: process.cwd(), host: process.env.COMPUTERNAME || process.env.HOSTNAME || null },
+    ...(expiresAt ? { expires_at: expiresAt } : {}),
     ...(assets.length ? { assets } : {}),
     ...(typeof flags['push-body'] === 'string' ? { pushBody: flags['push-body'] } : {}),
   };
@@ -494,8 +514,9 @@ async function main() {
           '  relay notify [--title T] [--body B] [--url U]\n' +
           '  relay card --title T [--body B|--body-stdin] [--kind K] [--image PATH]...\n' +
           '             [--mermaid FILE|-] [--button "Label=action[:style]"]... [--link "Label=url"]...\n' +
-          '             [--copy TEXT|--copy-stdin] [--open] [--no-push] [--high] [--wait[=SECS]]\n' +
+          '             [--copy TEXT|--copy-stdin] [--ttl 30m|2h|1d] [--keep] [--open] [--no-push] [--high] [--wait[=SECS]]\n' +
           '             # --open auto-opens this desktop\'s browser to the card (what /show uses)\n' +
+          '             # --ttl sets when the card auto-clears from the feed; --keep never expires it\n' +
           '  relay draft --title T [--body B|--body-stdin] [--image PATH]... [--link "Label=url"]...\n' +
           '             [--push] [--no-open] [--high]   # rich WYSIWYG-editable message card; opens your browser\n' +
           '  relay poll <cardId> [--wait=SECS]\n' +

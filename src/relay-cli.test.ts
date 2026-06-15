@@ -5,9 +5,29 @@ import os from 'node:os';
 import { join } from 'node:path';
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 // @ts-ignore — zero-dep .mjs CLI has no .d.ts; the parsers are plain functions.
-import { parseButtonSpec, parseLinkSpec, buildDraftPayload, browserOpenCommand, isSameOrigin } from '../bin/relay.mjs';
+import { parseButtonSpec, parseLinkSpec, buildDraftPayload, browserOpenCommand, isSameOrigin, parseTtl } from '../bin/relay.mjs';
 // @ts-ignore — afk helpers live in the shared lib (read pure; the CLI does the writes).
 import { afkPath, readAfk } from '../lib/relay-lib.mjs';
+
+describe('parseTtl', () => {
+  test('parses unit suffixes to milliseconds', () => {
+    expect(parseTtl('30s')).toBe(30_000);
+    expect(parseTtl('15m')).toBe(15 * 60_000);
+    expect(parseTtl('2h')).toBe(2 * 3_600_000);
+    expect(parseTtl('1d')).toBe(86_400_000);
+  });
+  test('a bare number is treated as minutes', () => {
+    expect(parseTtl('45')).toBe(45 * 60_000);
+  });
+  test('tolerates whitespace and uppercase units', () => {
+    expect(parseTtl(' 3H ')).toBe(3 * 3_600_000);
+  });
+  test('returns null on a bad spec', () => {
+    expect(parseTtl('soon')).toBeNull();
+    expect(parseTtl('2weeks')).toBeNull();
+    expect(parseTtl('')).toBeNull();
+  });
+});
 
 describe('parseButtonSpec', () => {
   test('Label=action -> respond button with behavior field', () => {

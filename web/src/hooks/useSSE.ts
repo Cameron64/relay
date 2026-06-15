@@ -33,10 +33,19 @@ export function useSSE(enabled: boolean): void {
         /* ignore malformed */
       }
     };
+    const onRemoved = (e: MessageEvent) => {
+      try {
+        const { id } = JSON.parse(e.data);
+        if (id) useFeed.getState().remove(id);
+      } catch {
+        /* ignore malformed */
+      }
+    };
 
     es.addEventListener('open', onOpen);
     es.addEventListener('card-created', onCreated);
     es.addEventListener('card-updated', onUpdated);
+    es.addEventListener('card-removed', onRemoved);
 
     return () => {
       es.close();

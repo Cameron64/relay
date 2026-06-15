@@ -8,11 +8,30 @@ import {
   validateCardInput,
   createCard,
   getCard,
+  listCards,
   respondCard,
+  dismissCard,
+  sweepExpired,
   getAsset,
   pruneCards,
   __resetForTests,
 } from './cards-store.ts';
+
+// Minimal CardInput factory so the expiry tests aren't 8 lines of nulls each.
+function input(over: Partial<Parameters<typeof createCard>[0]> = {}) {
+  return {
+    kind: 'note',
+    title: 'x',
+    body: null,
+    buttons: [],
+    copy_text: null,
+    mermaid: null,
+    source: null,
+    priority: 'normal' as const,
+    expires_at: null,
+    ...over,
+  };
+}
 
 beforeAll(() => {
   ensureCardsSchema();
@@ -125,6 +144,61 @@ describe('respondCard — first-response-wins', () => {
 
   test('responding to a missing card returns notfound', () => {
     expect(respondCard('nope', { action: 'approved' }).status).toBe('notfound');
+  });
+});
+
+describe('expiry & dismiss', () => {
+  test('default TTL applies to notes but not to approvals/choices', () => {
+    expect(createCard(input({ kind: 'note' })).expires_at).not.toBeNull();
+    expect(createCard(input({ kind: 'diagram' })).expires_at).not.toBeNull();
+    expect(createCard(input({ kind: 'approval' })).expires_at).toBeNull();
+    expect(createCard(input({ kind: 'choice' })).expires_at).toBeNull();
+  });
+
+  test('an explicit expires_at overrides the default', () => {
+    const future = new Date(Date.now() + 3_600_000).toISOString();
+    expect(createCard(input({ kind: 'note', expires_at: future })).expires_at).toBe(future);
+  });
+
+  test('listCards excludes expired and dismissed cards', () => {
+    const past = new Date(Date.now() - 1000).toISOString();
+    const future = new Date(Date.now() + 3_600_000).toISOString();
+    const live = createCard(input({ kind: 'approval', title: 'live', expires_at: future }));
+    const expired = createCard(input({ kind: 'note', title: 'old', expires_at: past }));
+    const gone = createCard(input({ kind: 'approval', title: 'gone' }));
+    dismissCard(gone.id);
+    const ids = listCards().map((c) => c.id);
+    expect(ids).toContain(live.id);
+    expect(ids).not.toContain(expired.id);
+    expect(ids).not.toContain(gone.id);
+  });
+
+  test('dismissCard marks dismissed + expires the card; unknown id returns false', () => {
+    const c = createCard(input({ kind: 'approval' }));
+    expect(dismissCard(c.id)).toBe(true);
+    const fresh = getCard(c.id);
+    expect(fresh?.status).toBe('dismissed');
+    expect(fresh?.expires_at).not.toBeNull();
+    expect(dismissCard('nope')).toBe(false);
+  });
+
+  test('sweepExpired deletes lapsed cards (returning ids) and keeps live ones', () => {
+    const past = new Date(Date.now() - 1000).toISOString();
+    const future = new Date(Date.now() + 3_600_000).toISOString();
+    const dead = createCard(input({ kind: 'note', title: 'dead', expires_at: past }));
+    const alive = createCard(input({ kind: 'approval', title: 'alive', expires_at: future }));
+    const swept = sweepExpired();
+    expect(swept).toContain(dead.id);
+    expect(swept).not.toContain(alive.id);
+    expect(getCard(dead.id)).toBeNull();
+    expect(getCard(alive.id)).not.toBeNull();
+  });
+
+  test('respondCard pulls a never-expiring card into a grace window', () => {
+    const c = createCard(input({ kind: 'approval', buttons: [{ id: 'approved', label: 'A', behavior: 'respond', verdict: 'approved' }] }));
+    expect(c.expires_at).toBeNull();
+    respondCard(c.id, { action: 'approved' });
+    expect(getCard(c.id)?.expires_at).not.toBeNull();
   });
 });
 

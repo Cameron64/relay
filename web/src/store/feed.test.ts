@@ -43,4 +43,12 @@ describe('feed store', () => {
     useFeed.getState().clearFlash('a');
     expect(useFeed.getState().flashIds.has('a')).toBe(false);
   });
+
+  it('remove drops a card and clears its flash', () => {
+    useFeed.getState().upsert(card('a', '2026-06-14T10:00:00Z'), { flash: true });
+    useFeed.getState().upsert(card('b', '2026-06-14T11:00:00Z'));
+    useFeed.getState().remove('a');
+    expect(useFeed.getState().cards.map((c) => c.id)).toEqual(['b']);
+    expect(useFeed.getState().flashIds.has('a')).toBe(false);
+  });
 });
