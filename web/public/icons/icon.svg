@@ -1,0 +1,16 @@
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Relay">
+  <defs>
+    <linearGradient id="relayBg" x1="0" y1="0" x2="512" y2="512" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#818cf8"/>
+      <stop offset="1" stop-color="#4f46e5"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" fill="url(#relayBg)"/>
+  <g fill="none" stroke="#ffffff" stroke-width="26" stroke-linecap="round">
+    <path d="M315 180 A96 96 0 0 1 315 332"/>
+    <path d="M348 138 A150 150 0 0 1 348 374"/>
+    <path d="M197 180 A96 96 0 0 0 197 332"/>
+    <path d="M164 138 A150 150 0 0 0 164 374"/>
+  </g>
+  <circle cx="256" cy="256" r="36" fill="#ffffff"/>
+</svg>
