@@ -1,16 +1,18 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActionIcon,
   Badge,
   Box,
   Button,
   Center,
+  Chip,
   Drawer,
   Group,
   Loader,
   Paper,
   ScrollArea,
   Stack,
+  Switch,
   Text,
   Tooltip,
 } from '@mantine/core';
@@ -161,6 +163,12 @@ export function Activity() {
   const [state, setState] = useState<'idle' | 'loading' | 'ok' | 'warming' | 'error'>('idle');
   const [items, setItems] = useState<NotifyLogEntry[]>([]);
 
+  // Filters, applied client-side over the fetched page. Default hides the silenced (logged-but-not-
+  // pushed) rows so the list shows pushes that actually reached the phone — they're one toggle away.
+  const [hideSilenced, setHideSilenced] = useState(true);
+  const [sourceSel, setSourceSel] = useState<string[]>([]); // empty = all sources
+  const [eventSel, setEventSel] = useState<string[]>([]); // empty = all events
+
   const load = useCallback(async () => {
     setState('loading');
     const r = await fetchNotifications(200);
@@ -178,6 +186,103 @@ export function Activity() {
   useEffect(() => {
     if (opened) void load();
   }, [opened, load]);
+
+  // Only offer chips for the sources/events actually present in this page of the trail.
+  const presentSources = useMemo(() => {
+    const s = new Set<string>();
+    for (const n of items) s.add(n.source);
+    return [...s].sort();
+  }, [items]);
+  const presentEvents = useMemo(() => {
+    const s = new Set<string>();
+    for (const n of items) if (n.event) s.add(n.event);
+    return [...s].sort();
+  }, [items]);
+
+  const silencedCount = useMemo(() => items.reduce((acc, n) => acc + (n.delivered ? 0 : 1), 0), [items]);
+
+  const filtered = useMemo(
+    () =>
+      items.filter((n) => {
+        if (hideSilenced && !n.delivered) return false;
+        if (sourceSel.length && !sourceSel.includes(n.source)) return false;
+        if (eventSel.length && !eventSel.includes(n.event ?? '')) return false;
+        return true;
+      }),
+    [items, hideSilenced, sourceSel, eventSel],
+  );
+
+  const atDefaults = hideSilenced && sourceSel.length === 0 && eventSel.length === 0;
+  const resetFilters = useCallback(() => {
+    setHideSilenced(true);
+    setSourceSel([]);
+    setEventSel([]);
+  }, []);
+
+  const filterBar = (
+    <Paper
+      withBorder
+      p="xs"
+      radius="md"
+      bg="var(--mantine-color-body)"
+      style={{ position: 'sticky', top: 0, zIndex: 2 }}
+    >
+      <Stack gap={8}>
+        <Group justify="space-between" align="center" wrap="nowrap" gap="xs">
+          <Switch
+            size="xs"
+            checked={hideSilenced}
+            onChange={(e) => setHideSilenced(e.currentTarget.checked)}
+            label={`Hide silenced${silencedCount ? ` (${silencedCount})` : ''}`}
+          />
+          {!atDefaults ? (
+            <Button variant="subtle" size="compact-xs" color="gray" onClick={resetFilters}>
+              Reset
+            </Button>
+          ) : null}
+        </Group>
+
+        {presentSources.length > 1 ? (
+          <Box>
+            <Text size="xs" c="dimmed" fw={600} tt="uppercase" mb={4}>
+              Source
+            </Text>
+            <Chip.Group multiple value={sourceSel} onChange={setSourceSel}>
+              <Group gap={6}>
+                {presentSources.map((s) => (
+                  <Chip key={s} value={s} size="xs" variant="outline" color={SOURCE_COLOR[s as NotifySource] ?? 'gray'}>
+                    {SOURCE_LABEL[s as NotifySource] ?? s}
+                  </Chip>
+                ))}
+              </Group>
+            </Chip.Group>
+          </Box>
+        ) : null}
+
+        {presentEvents.length > 1 ? (
+          <Box>
+            <Text size="xs" c="dimmed" fw={600} tt="uppercase" mb={4}>
+              Event
+            </Text>
+            <Chip.Group multiple value={eventSel} onChange={setEventSel}>
+              <Group gap={6}>
+                {presentEvents.map((ev) => (
+                  <Chip key={ev} value={ev} size="xs" variant="outline" color={EVENT_COLOR[ev] ?? 'gray'}>
+                    {ev}
+                  </Chip>
+                ))}
+              </Group>
+            </Chip.Group>
+          </Box>
+        ) : null}
+
+        <Text size="xs" c="dimmed">
+          Showing {filtered.length} of {items.length}
+          {hideSilenced && silencedCount ? ` · ${silencedCount} silenced hidden` : ''}
+        </Text>
+      </Stack>
+    </Paper>
+  );
 
   return (
     <>
@@ -223,12 +328,19 @@ export function Activity() {
           </Text>
         ) : (
           <Stack gap="sm" pb="md">
-            <Text size="xs" c="dimmed">
-              Every push Relay has sent, newest first. The project/host/session tell you who fired it.
-            </Text>
-            {items.map((n) => (
-              <NotifyRow key={n.id} n={n} />
-            ))}
+            {filterBar}
+            {filtered.length === 0 ? (
+              <Stack align="center" py="xl" gap="sm">
+                <Text c="dimmed" ta="center">
+                  Nothing matches these filters.
+                </Text>
+                <Button variant="light" size="xs" onClick={resetFilters}>
+                  Reset filters
+                </Button>
+              </Stack>
+            ) : (
+              filtered.map((n) => <NotifyRow key={n.id} n={n} />)
+            )}
           </Stack>
         )}
       </Drawer>
