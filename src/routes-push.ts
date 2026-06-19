@@ -74,8 +74,6 @@ pushRoutes.post('/notify', async (c) => {
   if (!tokensMatch(c.req.header('x-write-token'), writeToken)) {
     return c.json({ error: 'unauthorized' }, 401);
   }
-  if (!isPushConfigured()) return c.json({ error: 'push not configured (VAPID keys unset)' }, 503);
-
   // Body is optional — an empty POST sends a default nudge.
   let body: any = {};
   const raw = await c.req.text();
@@ -91,16 +89,36 @@ pushRoutes.post('/notify', async (c) => {
   // log. The trailing metadata fields (source/sessionId/cwd/project/host/event) are optional and
   // carried only by enriched callers (the hooks, CLI, MCP) — a bare POST still works and logs as
   // source:'unknown' with null attribution.
+  // `deliver` lets a caller RECORD a push to the audit trail WITHOUT buzzing any device. The
+  // Notification hook sends deliver:false for 'idle' nudges ("Claude is waiting for your input") —
+  // they stay in the trail (so you can review which session went idle) but no longer ping the
+  // phone. Defaults true, so a bare POST and every other caller still delivers exactly as before.
+  const deliver = body.deliver !== false;
+
+  // Only actual delivery needs VAPID configured; a silent (deliver:false) record does not.
+  if (deliver && !isPushConfigured()) {
+    return c.json({ error: 'push not configured (VAPID keys unset)' }, 503);
+  }
+
   const title = isStr(body.title) ? body.title : 'Relay';
   const text = isStr(body.body) ? body.body : 'You have a new update.';
   const url = isStr(body.url) ? body.url : '/';
   const tag = isStr(body.tag) ? body.tag : 'relay';
 
   try {
-    const result = await sendPushToAll({ title, body: text, url, tag });
+    let sent = 0;
+    let failed = 0;
+    let total = 0;
+    if (deliver) {
+      const result = await sendPushToAll({ title, body: text, url, tag });
+      sent = result.sent;
+      failed = result.failed;
+      total = result.total;
+    }
+    // deliver:false → silenced: no send; counts stay 0 and the delivered:0 flag marks the row.
 
-    // Append to the audit trail AFTER the send (best-effort: recordNotify swallows its own
-    // errors and never throws, so a logging failure can't turn a delivered push into a 503).
+    // Append to the audit trail (best-effort: recordNotify swallows its own errors and never
+    // throws, so a logging failure can't turn a push into a 503).
     recordNotify({
       source: isStr(body.source) ? body.source : 'unknown',
       title,
@@ -113,13 +131,14 @@ pushRoutes.post('/notify', async (c) => {
       host: isStr(body.host) ? body.host : null,
       event: isStr(body.event) ? body.event : null,
       cardId: isStr(body.cardId) ? body.cardId : null,
-      sent: result.sent,
-      failed: result.failed,
-      subscribers: result.total,
+      sent,
+      failed,
+      subscribers: total,
+      delivered: deliver,
     });
     pruneNotifyLog();
 
-    return c.json(result);
+    return c.json({ sent, failed, total, delivered: deliver });
   } catch (err) {
     console.error('[push] notify error:', err);
     return c.json({ error: 'storage unavailable' }, 503);

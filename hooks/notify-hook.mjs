@@ -53,6 +53,12 @@ async function main() {
   // no need to open the app to find out. Body stays the verbatim Claude Code message.
   const title = project ? `Claude Code · ${project}` : 'Claude Code';
 
+  // 'idle' = "Claude is waiting for your input" — a low-value nudge with nothing to act on (it
+  // led nowhere when tapped). Record it for the audit trail (deliver:false) but DON'T buzz the
+  // phone. Permission prompts and everything else still push normally.
+  const event = classifyNotification(message);
+  const deliver = event !== 'idle';
+
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), 2500);
   try {
@@ -69,7 +75,8 @@ async function main() {
         cwd,
         project,
         host,
-        event: classifyNotification(message),
+        event,
+        deliver,
       }),
       signal: ctrl.signal,
     });

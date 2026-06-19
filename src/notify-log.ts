@@ -44,6 +44,9 @@ export type NotifyLogEntry = {
   sent: number;
   failed: number;
   subscribers: number;
+  // 1 = actually pushed to devices; 0 = recorded-but-silenced (e.g. an 'idle' nudge the hook
+  // logs for the trail but deliberately does NOT buzz the phone). Lets the UI show "silenced".
+  delivered: number;
 };
 
 export type RecordNotifyInput = {
@@ -61,6 +64,7 @@ export type RecordNotifyInput = {
   sent?: number;
   failed?: number;
   subscribers?: number;
+  delivered?: boolean | number; // default true (1); pass false for a logged-but-not-pushed row
 };
 
 const VALID_SOURCES = new Set<NotifySource>(['notification', 'stop', 'cli', 'mcp', 'card', 'unknown']);
@@ -89,10 +93,18 @@ export function ensureNotifyLogSchema(): void {
         card_id     TEXT,
         sent        INTEGER NOT NULL DEFAULT 0,
         failed      INTEGER NOT NULL DEFAULT 0,
-        subscribers INTEGER NOT NULL DEFAULT 0
+        subscribers INTEGER NOT NULL DEFAULT 0,
+        delivered   INTEGER NOT NULL DEFAULT 1
       );
       CREATE INDEX IF NOT EXISTS idx_notify_log_created ON notify_log(created_at DESC);
     `);
+    // Migration: `delivered` was added after the table first shipped (the 'suppress idle pings'
+    // change). CREATE TABLE IF NOT EXISTS won't add it to the already-deployed prod table, so add
+    // it idempotently — existing rows backfill to 1 (they were all really delivered).
+    const cols = db.query('PRAGMA table_info(notify_log)').all() as { name: string }[];
+    if (!cols.some((c) => c.name === 'delivered')) {
+      db.exec('ALTER TABLE notify_log ADD COLUMN delivered INTEGER NOT NULL DEFAULT 1');
+    }
     _ready = true;
   } catch (err) {
     _ready = false;
@@ -133,9 +145,9 @@ export function recordNotify(input: RecordNotifyInput): string | null {
     const now = new Date().toISOString();
     db.query(
       `INSERT INTO notify_log
-         (id, created_at, source, title, body, tag, url, session_id, cwd, project, host, event, card_id, sent, failed, subscribers)
+         (id, created_at, source, title, body, tag, url, session_id, cwd, project, host, event, card_id, sent, failed, subscribers, delivered)
        VALUES
-         ($id, $created, $source, $title, $body, $tag, $url, $session, $cwd, $project, $host, $event, $card, $sent, $failed, $subs)`,
+         ($id, $created, $source, $title, $body, $tag, $url, $session, $cwd, $project, $host, $event, $card, $sent, $failed, $subs, $delivered)`,
     ).run({
       $id: id,
       $created: now,
@@ -153,6 +165,7 @@ export function recordNotify(input: RecordNotifyInput): string | null {
       $sent: coerceCount(input.sent),
       $failed: coerceCount(input.failed),
       $subs: coerceCount(input.subscribers),
+      $delivered: input.delivered === false || input.delivered === 0 ? 0 : 1,
     });
     return id;
   } catch (err) {

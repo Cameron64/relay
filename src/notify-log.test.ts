@@ -62,6 +62,14 @@ describe('recordNotify + listNotifications', () => {
     expect(r.card_id).toBeNull();
     expect(r.sent).toBe(1);
     expect(r.subscribers).toBe(1);
+    expect(r.delivered).toBe(1); // default — actually pushed
+  });
+
+  test('delivered:false records a silenced (logged-but-not-pushed) row', () => {
+    recordNotify(entry({ delivered: false, sent: 0, subscribers: 0 }));
+    const r = listNotifications()[0];
+    expect(r.delivered).toBe(0);
+    expect(r.event).toBe('idle');
   });
 
   test('coerces an unknown source to "unknown"', () => {

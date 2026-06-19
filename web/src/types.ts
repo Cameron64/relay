@@ -64,6 +64,7 @@ export interface NotifyLogEntry {
   sent: number;
   failed: number;
   subscribers: number;
+  delivered: number; // 1 = pushed to devices; 0 = logged-but-silenced (e.g. an idle nudge)
 }
 
 export interface Card {

@@ -130,9 +130,9 @@ function NotifyRow({ n }: { n: NotifyLogEntry }) {
 
         <Group justify="space-between" align="center" gap="xs">
           <Text size="xs" c="dimmed">
-            {n.sent} sent
-            {n.failed ? ` · ${n.failed} failed` : ''}
-            {` · ${n.subscribers} device${n.subscribers === 1 ? '' : 's'}`}
+            {n.delivered
+              ? `${n.sent} sent${n.failed ? ` · ${n.failed} failed` : ''} · ${n.subscribers} device${n.subscribers === 1 ? '' : 's'}`
+              : '🔕 silenced — logged, not pushed'}
           </Text>
           {actionable ? (
             <Badge size="xs" variant="dot" color="green">
