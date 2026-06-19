@@ -22,7 +22,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { pathToFileURL } from 'node:url';
-import { loadConfig } from '../lib/relay-lib.mjs';
+import { loadConfig, projectFromCwd } from '../lib/relay-lib.mjs';
 import { createCard, pollResponse, sendNotify } from '../lib/relay-client.mjs';
 import { buildCardPayload, buildChoicePayload, buildAskPayload, buildPagePayload, parseTtl, VERDICT_ALIAS } from './relay.mjs';
 
@@ -358,6 +358,10 @@ export async function handleCall(name, rawArgs) {
           title: args.title || 'Relay',
           body: args.body || 'You have a new update.',
           url: args.url || '/',
+          source: 'mcp',
+          cwd: ctx.cwd,
+          project: projectFromCwd(ctx.cwd),
+          host: ctx.host,
         });
         return okResult(r.ok ? { status: 'sent', ok: true } : { status: 'sent', ok: false, reason: r.reason || 'push-unavailable' });
       }

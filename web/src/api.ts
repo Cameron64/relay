@@ -1,4 +1,4 @@
-import type { Card, CardResponse } from './types';
+import type { Card, CardResponse, NotifyLogEntry } from './types';
 
 // All UI-side calls carry the relay_session httpOnly cookie (set at /api/unlock).
 export function api(path: string, opts: RequestInit = {}): Promise<Response> {
@@ -28,6 +28,28 @@ export async function fetchCards(since?: string | null): Promise<FeedResult> {
   if (!res.ok) return { status: 'error' };
   const data = await res.json().catch(() => ({ cards: [] }));
   return { status: 'ok', cards: data.cards || [] };
+}
+
+export type NotificationsResult =
+  | { status: 'ok'; notifications: NotifyLogEntry[] }
+  | { status: 'unauth' }
+  | { status: 'warming' }
+  | { status: 'error' };
+
+// The notification audit trail (GET /api/notifications), newest first. 503 = log table still
+// warming; the Activity drawer shows that as a transient state, distinct from a hard error.
+export async function fetchNotifications(limit = 100): Promise<NotificationsResult> {
+  let res: Response;
+  try {
+    res = await api('/api/notifications?limit=' + limit);
+  } catch {
+    return { status: 'error' };
+  }
+  if (res.status === 401) return { status: 'unauth' };
+  if (res.status === 503) return { status: 'warming' };
+  if (!res.ok) return { status: 'error' };
+  const data = await res.json().catch(() => ({ notifications: [] }));
+  return { status: 'ok', notifications: data.notifications || [] };
 }
 
 export async function unlock(token: string): Promise<{ ok: boolean; status: number }> {

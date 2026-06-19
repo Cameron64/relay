@@ -17,6 +17,7 @@ import { streamSSE } from 'hono/streaming';
 import { requireUi, requireWrite, handleUnlock } from './session.ts';
 import * as cards from './cards-store.ts';
 import { isPushConfigured, sendPushToAll } from './push.ts';
+import { recordNotify, listNotifications, notifyLogReady, pruneNotifyLog } from './notify-log.ts';
 import { waitForResponse, resolveWaiters } from './waiters.ts';
 import { addClient, removeClient, hubSize, broadcast } from './stream.ts';
 
@@ -126,17 +127,18 @@ appRoutes.post('/cards', requireWrite, async (c) => {
     const solicitsResponse = isPrompt || respondActions.length > 0 || optionActions.length > 0;
     const urgent = high || solicitsResponse;
     const cardUrl = '/?card=' + card.id + (isPrompt ? '&reply=1' : '');
+    const pushBody =
+      typeof body.pushBody === 'string' && body.pushBody
+        ? body.pushBody
+        : isPrompt
+          ? 'Tap Reply to answer'
+          : card.kind === 'approval'
+            ? 'Tap to review & respond'
+            : 'Tap to view';
     try {
-      push = await sendPushToAll({
+      const result = await sendPushToAll({
         title: card.title,
-        body:
-          typeof body.pushBody === 'string' && body.pushBody
-            ? body.pushBody
-            : isPrompt
-              ? 'Tap Reply to answer'
-              : card.kind === 'approval'
-                ? 'Tap to review & respond'
-                : 'Tap to view',
+        body: pushBody,
         url: cardUrl,
         tag: card.id,
         cardId: card.id,
@@ -144,6 +146,29 @@ appRoutes.post('/cards', requireWrite, async (c) => {
         ...(urgent ? { urgency: 'high' as const } : {}),
         ...(high ? { requireInteraction: true } : {}),
       });
+      push = result;
+      // Add the card push to the same audit trail as bare /api/notify pushes, so the Activity log
+      // is one unified timeline. Attribution comes from card.source (cwd/host set by the CLI/MCP);
+      // a card_id marks this push as actionable (the "tap leads somewhere" case).
+      const src = (card.source ?? {}) as Record<string, unknown>;
+      const cwd = typeof src.cwd === 'string' ? src.cwd : null;
+      recordNotify({
+        source: 'card',
+        title: card.title,
+        body: pushBody,
+        tag: card.id,
+        url: cardUrl,
+        sessionId: typeof src.sessionId === 'string' ? src.sessionId : null,
+        cwd,
+        project: cwd ? cwd.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || null : null,
+        host: typeof src.host === 'string' ? src.host : null,
+        event: card.kind,
+        cardId: card.id,
+        sent: result.sent,
+        failed: result.failed,
+        subscribers: result.total,
+      });
+      pruneNotifyLog();
     } catch (err) {
       console.error('[cards] push failed:', err);
     }
@@ -165,6 +190,18 @@ appRoutes.get('/cards', requireUi, (c) => {
   const since = c.req.query('since') || undefined;
   const limit = Number(c.req.query('limit') || '100');
   return c.json({ cards: cards.listCards({ since, limit }) });
+});
+
+// --- notification audit trail (UI side) ------------------------------------
+// Every push Relay sent, newest first, with its origin (session/project/host) — the Activity
+// drawer reads this to answer "why did I get that push and who fired it?". Read-only, UI-token
+// gated like the card feed. 503 (not 500) when the log table is unavailable so the drawer can
+// show a "warming up" state instead of an error, matching the cards feed's degrade.
+appRoutes.get('/notifications', requireUi, (c) => {
+  if (!notifyLogReady()) return c.json({ error: 'notification log unavailable' }, 503);
+  const since = c.req.query('since') || undefined;
+  const limit = Number(c.req.query('limit') || '100');
+  return c.json({ notifications: listNotifications({ since, limit: Number.isFinite(limit) ? limit : 100 }) });
 });
 
 appRoutes.get('/cards/:id', requireUi, (c) => {

@@ -20,7 +20,7 @@ import { readFileSync, existsSync, mkdirSync, writeFileSync, rmSync } from 'node
 import { join, extname } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { spawn } from 'node:child_process';
-import { loadConfig, configPath, relayDir, armedDir, sessionKey, afkPath, readAfk } from '../lib/relay-lib.mjs';
+import { loadConfig, configPath, relayDir, armedDir, sessionKey, afkPath, readAfk, projectFromCwd } from '../lib/relay-lib.mjs';
 
 const PER_POLL_CAP = 50; // server caps at 55; leave margin
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -379,10 +379,16 @@ async function cmdInit(flags) {
 async function cmdNotify(cfg, flags) {
   let body = typeof flags.body === 'string' ? flags.body : '';
   if (!body) body = (await readStdin()).trim();
+  // Attribution so a hand-fired `relay notify` is traceable in the audit log too (source 'cli').
+  const cwd = process.cwd();
   const payload = {
     title: typeof flags.title === 'string' ? flags.title : 'Relay',
     body: body || 'You have a new update.',
     url: typeof flags.url === 'string' ? flags.url : '/',
+    source: 'cli',
+    cwd,
+    project: projectFromCwd(cwd),
+    host: process.env.COMPUTERNAME || process.env.HOSTNAME || null,
   };
   let res;
   try {

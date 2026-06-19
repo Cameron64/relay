@@ -43,6 +43,29 @@ export interface CardSource {
   [key: string]: unknown;
 }
 
+// One row of the notification audit trail (mirrors src/notify-log.ts NotifyLogEntry). Read back
+// by the Activity drawer to answer "why did I get that push, and which session sent it?".
+export type NotifySource = 'notification' | 'stop' | 'cli' | 'mcp' | 'card' | 'unknown';
+
+export interface NotifyLogEntry {
+  id: string;
+  created_at: string;
+  source: NotifySource;
+  title: string;
+  body: string;
+  tag: string | null;
+  url: string | null;
+  session_id: string | null;
+  cwd: string | null;
+  project: string | null;
+  host: string | null;
+  event: string | null; // 'idle' | 'permission' | 'done' | 'other' | a card kind
+  card_id: string | null; // present ⇒ actionable (the tap leads to a card)
+  sent: number;
+  failed: number;
+  subscribers: number;
+}
+
 export interface Card {
   id: string;
   title: string;

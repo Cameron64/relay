@@ -5,6 +5,7 @@ import { pushRoutes } from './routes-push.ts';
 import { appRoutes } from './routes-cards.ts';
 import { store } from './store.ts';
 import { ensureCardsSchema, cardsReady, sweepExpired } from './cards-store.ts';
+import { ensureNotifyLogSchema } from './notify-log.ts';
 import { broadcast } from './stream.ts';
 
 // Initialize the subscription store (idempotent, non-fatal — see store.ts).
@@ -40,6 +41,10 @@ try {
 } catch {
   console.error('[relay] cards schema init failed — card routes will 503 until storage recovers');
 }
+
+// Notification audit log: best-effort init (it degrades silently — see notify-log.ts). A failure
+// here only disables /api/notifications; push delivery and the card feed are unaffected.
+ensureNotifyLogSchema();
 
 app.route('/api', pushRoutes); // -> /api/push/*, /api/notify
 app.route('/api', appRoutes); // -> /api/unlock, /api/stream, /api/cards/*

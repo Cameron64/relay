@@ -1,5 +1,6 @@
 import { ActionIcon, Box, Button, Group, Text, Tooltip, useComputedColorScheme, useMantineColorScheme } from '@mantine/core';
 import { usePush } from '../hooks/usePush';
+import { Activity } from './Activity';
 
 export function TopBar({ showLock, onLock }: { showLock: boolean; onLock: () => void }) {
   const { setColorScheme } = useMantineColorScheme();
@@ -45,6 +46,8 @@ export function TopBar({ showLock, onLock }: { showLock: boolean; onLock: () => 
             {computed === 'dark' ? '☀' : '☾'}
           </ActionIcon>
         </Tooltip>
+
+        {showLock ? <Activity /> : null}
 
         {showLock ? (
           <Button variant="subtle" size="xs" color="gray" onClick={onLock} title="Forget this device">

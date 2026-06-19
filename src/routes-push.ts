@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { tokensMatch } from './auth.ts';
 import { store } from './store.ts';
 import { getPublicKey, isPushConfigured, sendPushToAll } from './push.ts';
+import { recordNotify, pruneNotifyLog } from './notify-log.ts';
 
 // Web Push endpoints. Mounted under `/api` in server.ts, so the public paths are:
 //   GET  /api/push/public-key   — VAPID public key for the client subscribe handshake (open)
@@ -86,13 +87,38 @@ pushRoutes.post('/notify', async (c) => {
     }
   }
 
+  // Resolve the push fields once so the SAME values are both delivered and written to the audit
+  // log. The trailing metadata fields (source/sessionId/cwd/project/host/event) are optional and
+  // carried only by enriched callers (the hooks, CLI, MCP) — a bare POST still works and logs as
+  // source:'unknown' with null attribution.
+  const title = isStr(body.title) ? body.title : 'Relay';
+  const text = isStr(body.body) ? body.body : 'You have a new update.';
+  const url = isStr(body.url) ? body.url : '/';
+  const tag = isStr(body.tag) ? body.tag : 'relay';
+
   try {
-    const result = await sendPushToAll({
-      title: isStr(body.title) ? body.title : 'Relay',
-      body: isStr(body.body) ? body.body : 'You have a new update.',
-      url: isStr(body.url) ? body.url : '/',
-      tag: isStr(body.tag) ? body.tag : 'relay',
+    const result = await sendPushToAll({ title, body: text, url, tag });
+
+    // Append to the audit trail AFTER the send (best-effort: recordNotify swallows its own
+    // errors and never throws, so a logging failure can't turn a delivered push into a 503).
+    recordNotify({
+      source: isStr(body.source) ? body.source : 'unknown',
+      title,
+      body: text,
+      tag,
+      url,
+      sessionId: isStr(body.sessionId) ? body.sessionId : null,
+      cwd: isStr(body.cwd) ? body.cwd : null,
+      project: isStr(body.project) ? body.project : null,
+      host: isStr(body.host) ? body.host : null,
+      event: isStr(body.event) ? body.event : null,
+      cardId: isStr(body.cardId) ? body.cardId : null,
+      sent: result.sent,
+      failed: result.failed,
+      subscribers: result.total,
     });
+    pruneNotifyLog();
+
     return c.json(result);
   } catch (err) {
     console.error('[push] notify error:', err);

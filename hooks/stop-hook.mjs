@@ -7,9 +7,10 @@
 // exit 0 (NEVER exit 2 — that would prevent the session from ending). The arm flag is keyed by
 // cwd (see lib/relay-lib.mjs sessionKey) so `relay arm` and this hook agree on the key.
 
+import os from 'node:os';
 import { readFileSync, existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { loadConfig, armedDir, sessionKey } from '../lib/relay-lib.mjs';
+import { loadConfig, armedDir, sessionKey, projectFromCwd } from '../lib/relay-lib.mjs';
 
 setTimeout(() => process.exit(0), 4000); // absolute backstop
 
@@ -51,13 +52,35 @@ async function main() {
     // best effort
   }
 
+  // Attribution (same shape as notify-hook) so the "done" ping is traceable in the audit log too.
+  const sessionId = typeof payload.session_id === 'string' ? payload.session_id : null;
+  const cwd = typeof payload.cwd === 'string' ? payload.cwd : null;
+  const project = projectFromCwd(cwd);
+  let host = null;
+  try {
+    host = os.hostname() || null;
+  } catch {
+    /* hostname unavailable — leave null */
+  }
+
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), 2500);
   try {
     await fetch(`${cfg.url}/api/notify`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-write-token': cfg.writeToken },
-      body: JSON.stringify({ title: 'Relay', body: `✅ ${label} — done`, tag: 'relay-done', url: '/' }),
+      body: JSON.stringify({
+        title: project ? `Relay · ${project}` : 'Relay',
+        body: `✅ ${label} — done`,
+        tag: 'relay-done',
+        url: '/',
+        source: 'stop',
+        sessionId,
+        cwd,
+        project,
+        host,
+        event: 'done',
+      }),
       signal: ctrl.signal,
     });
   } catch {
