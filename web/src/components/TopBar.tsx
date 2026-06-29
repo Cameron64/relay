@@ -2,6 +2,34 @@ import { ActionIcon, Box, Button, Group, Text, Tooltip, useComputedColorScheme, 
 import { usePush } from '../hooks/usePush';
 import { Activity } from './Activity';
 
+// Injected at build time by Vite `define` (see vite.config.ts).
+declare const __BUILD_ID__: string;
+
+// Force the PWA onto the latest build. We deliberately do NOT unregister the service worker — that
+// would discard the Web Push subscription and silence the device until it's re-enabled. Instead: pull
+// any new SW (it self-activates via skipWaiting/clientsClaim in service-worker.js), clear Cache Storage
+// so stale hashed bundles can't be served, then reload. Navigation is network-first, so the reload
+// pulls a fresh index.html referencing the new assets.
+async function hardRefresh(): Promise<void> {
+  try {
+    if ('serviceWorker' in navigator) {
+      const reg = await navigator.serviceWorker.getRegistration();
+      if (reg) await reg.update();
+    }
+  } catch {
+    /* best effort — reload regardless */
+  }
+  try {
+    if ('caches' in window) {
+      const keys = await caches.keys();
+      await Promise.all(keys.map((k) => caches.delete(k)));
+    }
+  } catch {
+    /* best effort — reload regardless */
+  }
+  location.reload();
+}
+
 export function TopBar({ showLock, onLock }: { showLock: boolean; onLock: () => void }) {
   const { setColorScheme } = useMantineColorScheme();
   const computed = useComputedColorScheme('light', { getInitialValueInEffect: true });
@@ -17,9 +45,14 @@ export function TopBar({ showLock, onLock }: { showLock: boolean; onLock: () => 
           h={10}
           style={{ borderRadius: '50%', background: 'var(--mantine-color-indigo-5)' }}
         />
-        <Text fw={700} size="lg">
-          Relay
-        </Text>
+        <div>
+          <Text fw={700} size="lg" style={{ lineHeight: 1.1 }}>
+            Relay
+          </Text>
+          <Text c="dimmed" style={{ fontSize: 10, lineHeight: 1.1 }}>
+            build {__BUILD_ID__}
+          </Text>
+        </div>
       </Group>
 
       <Group gap="xs" align="center">
@@ -44,6 +77,18 @@ export function TopBar({ showLock, onLock }: { showLock: boolean; onLock: () => 
         <Tooltip label="Toggle theme" openDelay={300}>
           <ActionIcon variant="subtle" onClick={toggleScheme} aria-label="Toggle color scheme">
             {computed === 'dark' ? '☀' : '☾'}
+          </ActionIcon>
+        </Tooltip>
+
+        <Tooltip label="Hard refresh — clear cache & reload" openDelay={300}>
+          <ActionIcon
+            variant="subtle"
+            onClick={() => {
+              void hardRefresh();
+            }}
+            aria-label="Hard refresh"
+          >
+            ↻
           </ActionIcon>
         </Tooltip>
 

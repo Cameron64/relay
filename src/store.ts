@@ -26,6 +26,8 @@ export interface SubscriptionStore {
   upsert(sub: StoredSubscription): Promise<void>;
   remove(endpoint: string): Promise<void>;
   all(): Promise<StoredSubscription[]>;
+  /** Number of stored subscriptions — backs the read-only /api/push/count status endpoint. */
+  count(): Promise<number>;
   /** Delete endpoints the push service reported gone (404/410). */
   pruneExpired(endpoints: string[]): Promise<void>;
   /** Stamp last_sent_at on everything except the just-pruned endpoints. */
@@ -90,6 +92,11 @@ export const store: SubscriptionStore = {
     return db
       .query('SELECT endpoint, p256dh, auth, user_label AS userLabel FROM push_subscriptions')
       .all() as StoredSubscription[];
+  },
+
+  async count() {
+    const row = db.query('SELECT COUNT(*) AS n FROM push_subscriptions').get() as { n: number };
+    return row.n;
   },
 
   async pruneExpired(endpoints) {

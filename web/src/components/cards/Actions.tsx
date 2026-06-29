@@ -2,7 +2,8 @@ import { useState } from 'react';
 import { Button, Group, Stack, Textarea } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { respond } from '../../api';
-import { copyText } from '../../utils/clipboard';
+import { copyRich } from '../../utils/clipboard';
+import { markdownToSafeHtml } from '../../utils/markdown';
 import { useFeed } from '../../store/feed';
 import type { Card, CardButton } from '../../types';
 
@@ -50,7 +51,10 @@ export function Actions({ card }: { card: Card }) {
 
   const onClick = (b: CardButton) => {
     if (b.behavior === 'copy') {
-      copyText(b.value ?? card.copy_text ?? card.body ?? '');
+      // Copy rich HTML so the paste keeps formatting in Slack/Teams/Outlook (which read text/html),
+      // with the original markdown kept as the plain-text fallback for plain-only targets.
+      const src = b.value ?? card.copy_text ?? card.body ?? '';
+      copyRich(markdownToSafeHtml(src), src);
       return;
     }
     if (b.behavior === 'link') {

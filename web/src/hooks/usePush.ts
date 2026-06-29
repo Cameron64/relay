@@ -35,20 +35,27 @@ async function isSubscribed(): Promise<boolean> {
   return !!(await reg.pushManager.getSubscription());
 }
 
-async function subscribe(): Promise<void> {
-  const permission = await Notification.requestPermission();
-  if (permission !== 'granted') throw new Error(permission);
+// Per-device opt-in flag. Set when the user taps Enable, cleared when they tap Disable. reconcile()
+// uses it to tell "the browser silently dropped my subscription" (heal it) apart from "I turned push
+// off on purpose" (leave it off) — both look identical otherwise: permission granted, no subscription.
+const INTENT_KEY = 'relay:push-intent';
+function wantsPush(): boolean {
+  try {
+    return localStorage.getItem(INTENT_KEY) === 'on';
+  } catch {
+    return false;
+  }
+}
+function setWantsPush(on: boolean): void {
+  try {
+    localStorage.setItem(INTENT_KEY, on ? 'on' : 'off');
+  } catch {
+    /* storage disabled (private mode) — intent just won't persist across reloads */
+  }
+}
 
-  const reg = await navigator.serviceWorker.ready;
-  const res = await fetch('/api/push/public-key');
-  if (!res.ok) throw new Error('push not configured on server');
-  const { key } = await res.json();
-
-  const sub = await reg.pushManager.subscribe({
-    userVisibleOnly: true,
-    applicationServerKey: urlBase64ToUint8Array(key),
-  });
-
+// Register a browser subscription with the server (idempotent upsert keyed on endpoint).
+async function saveSubscription(sub: PushSubscription): Promise<boolean> {
   const json = sub.toJSON();
   const save = await fetch('/api/push/subscribe', {
     method: 'POST',
@@ -59,10 +66,65 @@ async function subscribe(): Promise<void> {
       userLabel: navigator.userAgent.slice(0, 100),
     }),
   });
-  if (!save.ok) throw new Error('failed to save subscription');
+  return save.ok;
+}
+
+// Create a fresh browser subscription and register it server-side. Assumes notification permission
+// is ALREADY granted (callers check) so reg.pushManager.subscribe() resolves without a prompt —
+// which is what lets reconcile() heal a dropped subscription silently. Shared by the user-initiated
+// subscribe() and the silent self-heal below.
+async function createSubscription(): Promise<void> {
+  const reg = await navigator.serviceWorker.ready;
+  const res = await fetch('/api/push/public-key');
+  if (!res.ok) throw new Error('push not configured on server');
+  const { key } = await res.json();
+  const sub = await reg.pushManager.subscribe({
+    userVisibleOnly: true,
+    applicationServerKey: urlBase64ToUint8Array(key),
+  });
+  if (!(await saveSubscription(sub))) throw new Error('failed to save subscription');
+}
+
+// Keep the server in sync on every app open AND self-heal a silently-dropped subscription. With
+// permission granted there are three cases:
+//   • subscription present       → re-assert it server-side (heals a pruned/lost server row), and
+//                                   backfill the intent flag so a later drop self-heals even for
+//                                   devices that subscribed before this flag existed.
+//   • gone, but user wants push  → the browser dropped it (FCM rotation, SW/storage eviction) while
+//                                   permission stayed granted — re-create it with NO prompt. This is
+//                                   the "notifications stay on" fix.
+//   • gone, user turned it off   → leave it off; don't fight a deliberate disable.
+// Returns true only when it re-created a subscription, so the caller can refresh the toggle. All
+// failures are swallowed — best-effort, must never throw into render.
+async function reconcile(): Promise<boolean> {
+  try {
+    if (!pushSupported() || Notification.permission !== 'granted') return false;
+    const reg = await navigator.serviceWorker.ready;
+    const sub = await reg.pushManager.getSubscription();
+    if (sub) {
+      setWantsPush(true);
+      await saveSubscription(sub);
+      return false;
+    }
+    if (wantsPush()) {
+      await createSubscription();
+      return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+async function subscribe(): Promise<void> {
+  const permission = await Notification.requestPermission();
+  if (permission !== 'granted') throw new Error(permission);
+  await createSubscription();
+  setWantsPush(true);
 }
 
 async function unsubscribe(): Promise<void> {
+  setWantsPush(false);
   const reg = await navigator.serviceWorker.ready;
   const sub = await reg.pushManager.getSubscription();
   if (sub) {
@@ -110,7 +172,17 @@ export function usePush(): PushState {
   }, []);
 
   useEffect(() => {
-    refresh();
+    let cancelled = false;
+    void (async () => {
+      await refresh();
+      // Re-assert (or silently re-create) the subscription server-side. If it re-created one, the
+      // earlier refresh() saw "off" — refresh again so the toggle reflects the healed state.
+      const healed = await reconcile();
+      if (healed && !cancelled) await refresh();
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [refresh]);
 
   const toggle = useCallback(async () => {

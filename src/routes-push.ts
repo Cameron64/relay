@@ -27,6 +27,18 @@ pushRoutes.get('/push/public-key', (c) => {
   return c.json({ key });
 });
 
+// Read-only subscriber count. Lets you see "how many devices are subscribed" WITHOUT firing a
+// real push via /api/notify (which is the only other way to learn the total). Open like the
+// other push GETs — it discloses a count only, never any subscription details or endpoints.
+pushRoutes.get('/push/count', async (c) => {
+  try {
+    return c.json({ count: await store.count() });
+  } catch (err) {
+    console.error('[push] count store error:', err);
+    return c.json({ error: 'storage unavailable' }, 503);
+  }
+});
+
 pushRoutes.post('/push/subscribe', async (c) => {
   let body: any;
   try {
