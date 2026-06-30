@@ -35,13 +35,17 @@ async function isSubscribed(): Promise<boolean> {
   return !!(await reg.pushManager.getSubscription());
 }
 
-// Per-device opt-in flag. Set when the user taps Enable, cleared when they tap Disable. reconcile()
-// uses it to tell "the browser silently dropped my subscription" (heal it) apart from "I turned push
-// off on purpose" (leave it off) — both look identical otherwise: permission granted, no subscription.
+// Per-device push intent flag in localStorage. The ONLY value that suppresses self-heal is an explicit
+// 'off' (the user tapped Disable). Anything else — 'on', or unset — counts as "wants push" once
+// notification permission is granted. Defaulting *unset* to "wants push" is deliberate and load-bearing:
+// a device can reach this code with its subscription already dropped and no flag yet (it dropped before
+// the flag mechanism first ran, or localStorage was evicted). Requiring an explicit 'on' left those
+// devices stuck off forever — the exact bug this fixes. Permission only becomes 'granted' via the
+// user-initiated subscribe() below, so "granted + not explicitly off" is a safe proxy for real intent.
 const INTENT_KEY = 'relay:push-intent';
-function wantsPush(): boolean {
+function optedOut(): boolean {
   try {
-    return localStorage.getItem(INTENT_KEY) === 'on';
+    return localStorage.getItem(INTENT_KEY) === 'off';
   } catch {
     return false;
   }
@@ -85,34 +89,38 @@ async function createSubscription(): Promise<void> {
   if (!(await saveSubscription(sub))) throw new Error('failed to save subscription');
 }
 
-// Keep the server in sync on every app open AND self-heal a silently-dropped subscription. With
-// permission granted there are three cases:
-//   • subscription present       → re-assert it server-side (heals a pruned/lost server row), and
-//                                   backfill the intent flag so a later drop self-heals even for
-//                                   devices that subscribed before this flag existed.
-//   • gone, but user wants push  → the browser dropped it (FCM rotation, SW/storage eviction) while
-//                                   permission stayed granted — re-create it with NO prompt. This is
-//                                   the "notifications stay on" fix.
-//   • gone, user turned it off   → leave it off; don't fight a deliberate disable.
-// Returns true only when it re-created a subscription, so the caller can refresh the toggle. All
-// failures are swallowed — best-effort, must never throw into render.
-async function reconcile(): Promise<boolean> {
+// Keep the server in sync on every app open/resume AND self-heal a silently-dropped subscription.
+// With permission granted there are three outcomes:
+//   • subscription present        → re-assert it server-side (heals a pruned/lost server row) and
+//                                    record intent='on'.
+//   • gone, not explicitly off    → the browser dropped it (FCM rotation, SW/storage eviction) while
+//                                    permission stayed granted — re-create it with NO prompt. This is
+//                                    the "notifications stay on" fix. We heal on a *missing* flag too,
+//                                    not just 'on', so a device that dropped before the flag ever
+//                                    persisted still recovers.
+//   • gone, user tapped Disable   → intent is 'off'; leave it off, don't fight a deliberate disable.
+// Returns 'healed' when it re-created a subscription (caller refreshes the toggle), 'failed' when the
+// silent re-create threw (caller surfaces it), or 'noop' otherwise. Never throws into render.
+async function reconcile(): Promise<'healed' | 'failed' | 'noop'> {
   try {
-    if (!pushSupported() || Notification.permission !== 'granted') return false;
+    if (!pushSupported() || Notification.permission !== 'granted') return 'noop';
     const reg = await navigator.serviceWorker.ready;
     const sub = await reg.pushManager.getSubscription();
     if (sub) {
       setWantsPush(true);
       await saveSubscription(sub);
-      return false;
+      return 'noop';
     }
-    if (wantsPush()) {
-      await createSubscription();
-      return true;
-    }
-    return false;
+    if (optedOut()) return 'noop';
   } catch {
-    return false;
+    return 'noop'; // couldn't read SW/permission/storage state — nothing actionable
+  }
+  // Permission granted, no live subscription, not explicitly disabled → re-create silently.
+  try {
+    await createSubscription();
+    return 'healed';
+  } catch {
+    return 'failed';
   }
 }
 
@@ -173,15 +181,28 @@ export function usePush(): PushState {
 
   useEffect(() => {
     let cancelled = false;
-    void (async () => {
+    // One reconcile pass: sync the toggle from current state, then self-heal a dropped subscription.
+    // Runs on mount AND every time the PWA returns to the foreground. An installed app usually
+    // *resumes* (no React remount) when reopened, so a mount-only pass would miss most reopens — which
+    // is exactly when we need to catch a subscription the browser dropped while it was backgrounded.
+    const runPass = async () => {
       await refresh();
-      // Re-assert (or silently re-create) the subscription server-side. If it re-created one, the
-      // earlier refresh() saw "off" — refresh again so the toggle reflects the healed state.
-      const healed = await reconcile();
-      if (healed && !cancelled) await refresh();
-    })();
+      const result = await reconcile();
+      if (cancelled) return;
+      if (result === 'healed') {
+        await refresh(); // the refresh above saw "off"; flip the toggle back on
+      } else if (result === 'failed') {
+        setStatus('Could not restore notifications, tap to retry');
+      }
+    };
+    void runPass();
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') void runPass();
+    };
+    document.addEventListener('visibilitychange', onVisible);
     return () => {
       cancelled = true;
+      document.removeEventListener('visibilitychange', onVisible);
     };
   }, [refresh]);
 
