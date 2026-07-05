@@ -13,6 +13,14 @@
 // Every cwd this process spawns into comes from THIS FILE'S OWN local ~/.relay/runner.json, never
 // from the network. Do not "simplify" that away by trusting a path/command from a dispatch row.
 //
+// `dispatches.claude_session` (a DB-sourced id echoed back for --resume on follow-ups) IS one
+// piece of network-sourced data that reaches spawn's argv, and spawn runs with shell:true on
+// win32 (needed to resolve the `claude` PATH shim) — so it must be validated against a strict
+// allow-list format (isValidClaudeSessionId) BEFORE ever being placed in argv. A DB/server
+// compromise must not be able to smuggle shell metacharacters through this field into an
+// arbitrary command execution on the runner's desktop. See relay-runner.test.ts for the
+// regression test covering a malicious claude_session value.
+//
 // Deliberately run under plain `node` (not `bun`) — see the plan's Gotchas: child_process.spawn
 // semantics for a Windows-shimmed executable (`claude.cmd`) are the well-trodden ones under node,
 // and this file has zero dependencies either way.
@@ -114,6 +122,14 @@ export function resolveTarget(config, targetId) {
 export function buildPrompt(target, jobFile) {
   const prefix = target.promptPrefix || 'Triage this phone brainstorm: organize it, identify action items, and propose next steps.\n\n';
   return `${prefix}The user sent this from their phone. Full text is at ${jobFile} — read it first.\nWhen finished, summarize what you did/found.`;
+}
+
+// `claude -p --output-format json`'s session_id is a UUID today, but validate by allow-listed
+// charset rather than UUID shape specifically — cheap, forward-compatible, and (this is the part
+// that matters) closes off shell metacharacters before this value ever reaches argv under
+// spawn(..., { shell: true }) on win32. See the file header's SECURITY INVARIANT note.
+export function isValidClaudeSessionId(s) {
+  return typeof s === 'string' && /^[A-Za-z0-9_-]{1,200}$/.test(s);
 }
 
 // --- claude -p output parsing (exported for tests) --------------------------
@@ -219,8 +235,12 @@ function runClaude({ cwd, prompt, permissionMode, resumeSessionId, timeoutMin })
     let child;
     try {
       // shell:true on win32 only: resolves the `claude` PATH shim (commonly a .cmd/.ps1 wrapper,
-      // which node's spawn cannot exec directly without a shell) — safe here because argv carries
-      // no untrusted phone text (the prompt travels over stdin, not argv).
+      // which node's spawn cannot exec directly without a shell). The phone-supplied brainstorm
+      // body never reaches argv (it travels over stdin) — but `resumeSessionId` (DB-sourced, see
+      // the file header's SECURITY INVARIANT) does reach argv here. The caller (handleDispatch)
+      // MUST validate it with isValidClaudeSessionId before it ever gets to this function; this
+      // function does not re-validate so that a missing caller-side check fails loudly in tests
+      // rather than being silently masked here.
       child = spawn('claude', args, { cwd, stdio: ['pipe', 'pipe', 'pipe'], shell: process.platform === 'win32' });
     } catch (e) {
       resolve({ code: 1, stdout: '', stderr: `spawn failed: ${e.message}`, timedOut: false });
@@ -272,7 +292,22 @@ async function handleDispatch(cfg, runnerConfig, d) {
     return;
   }
 
-  log(`dispatch ${d.id}: running in ${target.cwd} (target=${target.id}, resume=${d.claude_session ?? 'none'})`);
+  // SECURITY: claude_session is DB-sourced (server-copied from a parent dispatch row on
+  // resume_of — see dispatch-store.ts), not free-typed phone text, but it still reaches
+  // spawn's argv under shell:true on win32 (see runClaude's SECURITY note). Validate its
+  // charset BEFORE it ever gets near argv — a DB/server compromise must not be able to smuggle
+  // shell metacharacters through this field into arbitrary command execution on this desktop.
+  let resumeSessionId = null;
+  if (d.claude_session) {
+    if (!isValidClaudeSessionId(d.claude_session)) {
+      log(`dispatch ${d.id}: rejected malformed claude_session on resume (refusing to pass it to spawn argv) — failing job`);
+      await reportStatus(cfg, d.id, { status: 'failed', result_summary: 'rejected: malformed claude_session on resume' });
+      return;
+    }
+    resumeSessionId = d.claude_session;
+  }
+
+  log(`dispatch ${d.id}: running in ${target.cwd} (target=${target.id}, resume=${resumeSessionId ?? 'none'})`);
   await reportStatus(cfg, d.id, { status: 'running' });
 
   const jobFile = writeJobFile(d.id, d.body);
@@ -281,7 +316,7 @@ async function handleDispatch(cfg, runnerConfig, d) {
     cwd: target.cwd,
     prompt,
     permissionMode: target.permissionMode,
-    resumeSessionId: d.claude_session || null,
+    resumeSessionId,
     timeoutMin: JOB_TIMEOUT_MIN,
   });
 
@@ -324,13 +359,39 @@ async function handleDispatch(cfg, runnerConfig, d) {
     log(`dispatch ${d.id}: result card post network error: ${e.message || e}`);
   }
 
-  await reportStatus(cfg, d.id, {
-    status: 'done',
-    claude_session: sessionId,
-    result_summary: resultText.slice(0, 200),
-    result_card_id: resultCardId,
-  });
-  log(`dispatch ${d.id}: done (session=${sessionId ?? 'none'}, card=${resultCardId ?? 'none'})`);
+  // Wrapped like postResultCard above (and deliberately NOT rethrown): the job already finished
+  // and — when resultCardId is set — already delivered a result card + push to the phone. If this
+  // call throws, letting it propagate to mainLoop's catch would report status:'failed' on a
+  // dispatch that in fact succeeded, permanently overwriting the true outcome (running -> failed
+  // is a legal transition, so the overwrite would stick) with no result_card_id/result_summary
+  // ever recorded — the phone would see a failed badge alongside a separately-arriving result
+  // card. Best-effort retry once after a short delay, then give up and just log.
+  try {
+    await reportStatus(cfg, d.id, {
+      status: 'done',
+      claude_session: sessionId,
+      result_summary: resultText.slice(0, 200),
+      result_card_id: resultCardId,
+    });
+    log(`dispatch ${d.id}: done (session=${sessionId ?? 'none'}, card=${resultCardId ?? 'none'})`);
+  } catch (e) {
+    log(`dispatch ${d.id}: reportStatus(done) network error, retrying once: ${e.message || e}`);
+    try {
+      await sleep(RETRY_DELAY_MS);
+      await reportStatus(cfg, d.id, {
+        status: 'done',
+        claude_session: sessionId,
+        result_summary: resultText.slice(0, 200),
+        result_card_id: resultCardId,
+      });
+      log(`dispatch ${d.id}: done on retry (session=${sessionId ?? 'none'}, card=${resultCardId ?? 'none'})`);
+    } catch (e2) {
+      log(
+        `dispatch ${d.id}: reportStatus(done) failed after retry — result card (${resultCardId ?? 'none'}) was already delivered; ` +
+          `NOT letting this bubble up to a failed report, which would overwrite a job that actually succeeded: ${e2.message || e2}`,
+      );
+    }
+  }
 }
 
 // --- main loop ---------------------------------------------------------------

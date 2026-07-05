@@ -4,7 +4,7 @@
 // run — no network, no child_process spawn, no ~/.relay/runner.json touched by this test file.
 import { test, expect, describe } from 'bun:test';
 // @ts-ignore — zero-dep .mjs daemon has no .d.ts; the helpers under test are plain functions.
-import { parseRunnerConfig, resolveTarget, buildPrompt, parseClaudeOutput } from '../bin/relay-runner.mjs';
+import { parseRunnerConfig, resolveTarget, buildPrompt, parseClaudeOutput, isValidClaudeSessionId } from '../bin/relay-runner.mjs';
 
 describe('parseRunnerConfig', () => {
   test('parses a full config', () => {
@@ -120,5 +120,38 @@ describe('parseClaudeOutput', () => {
     const out = parseClaudeOutput(JSON.stringify({ session_id: 's1', other: 'field' }));
     expect(out.sessionId).toBe('s1');
     expect(out.result).toContain('other');
+  });
+});
+
+// Regression coverage for the review finding: `dispatches.claude_session` is DB-sourced (echoed
+// back for --resume) but still reaches spawn's argv under shell:true on win32 (runClaude). A
+// compromised server/DB must not be able to smuggle shell metacharacters through this field into
+// arbitrary command execution — handleDispatch calls this guard on every d.claude_session before
+// it goes anywhere near runClaude/spawn.
+describe('isValidClaudeSessionId', () => {
+  test('accepts a realistic UUID-shaped session id', () => {
+    expect(isValidClaudeSessionId('550e8400-e29b-41d4-a716-446655440000')).toBe(true);
+  });
+
+  test('accepts plain alphanumeric/underscore ids', () => {
+    expect(isValidClaudeSessionId('abc123_XYZ-9')).toBe(true);
+  });
+
+  test('rejects shell metacharacter payloads (cmd.exe injection attempt)', () => {
+    expect(isValidClaudeSessionId('x & calc.exe &')).toBe(false);
+    expect(isValidClaudeSessionId('a"; rm -rf ~ #')).toBe(false);
+    expect(isValidClaudeSessionId('$(whoami)')).toBe(false);
+    expect(isValidClaudeSessionId('a|b')).toBe(false);
+    expect(isValidClaudeSessionId('a\nb')).toBe(false);
+    expect(isValidClaudeSessionId('a b')).toBe(false); // spaces alone can break unquoted argv too
+  });
+
+  test('rejects non-strings, empty string, and oversized ids', () => {
+    expect(isValidClaudeSessionId(null)).toBe(false);
+    expect(isValidClaudeSessionId(undefined)).toBe(false);
+    expect(isValidClaudeSessionId(123)).toBe(false);
+    expect(isValidClaudeSessionId('')).toBe(false);
+    expect(isValidClaudeSessionId('a'.repeat(201))).toBe(false);
+    expect(isValidClaudeSessionId('a'.repeat(200))).toBe(true);
   });
 });
