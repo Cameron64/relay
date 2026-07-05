@@ -192,13 +192,24 @@ side-effect-free HTTP client) plus the CLI's payload builders, so tool output ma
 
 ## Claude Code hooks
 
-Two hooks (in `hooks/`) make the phone ping automatic. They are **inert until
+Three hooks (in `hooks/`) make the phone ping automatic. They are **inert until
 `~/.relay/config.json` exists**, hard-timeout fast, and always exit 0 — so they can never hang
 or break a session.
 
 - **Notification** → pushes "Claude needs you" when Claude is waiting on you.
 - **Stop** → if you ran `relay arm "<label>"` this session, pushes "✅ &lt;label&gt; — done" when
   the turn ends (and clears the flag). No arm = no ping, so ordinary turns stay quiet.
+- **PreToolUse** (`pretool-hook.mjs`) → the AFK permission bridge. **Triple-gated**: only does
+  anything when `~/.relay/config.json` exists AND `relay afk on` is flagged AND
+  `~/.relay/permission-rules.json` has a rule matching the tool call. When all three line up, it
+  posts a sticky **approval card** ("⚠ project — allow Bash?") instead of letting the call stall
+  at an unattended terminal, then bounded-polls for a verdict and maps it to a `PreToolUse`
+  decision: **Allow** → the tool runs; **Deny** (optionally with a typed note) → the call is
+  denied and Claude sees the note, so you can redirect the session from the lock screen ("deny —
+  do X instead"). Any failure (timeout, no rule match, network error, dismissed card) falls back
+  to `ask` — the normal terminal prompt — **never** to auto-allow. See
+  `hooks/permission-rules.example.json` for the rule file shape; copy it to
+  `~/.relay/permission-rules.json` to opt in (no file = the hook never intercepts, even AFK).
 
 Wiring is opt-in (see `hooks/SETUP.md`): project-local `relay/.claude/settings.json` scopes the
 hooks to this repo; promote to `~/.claude/settings.json` for every session everywhere. To turn
