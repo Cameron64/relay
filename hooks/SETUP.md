@@ -13,7 +13,7 @@ Both are **inert until `~/.relay/config.json` exists** (run `relay init` first),
 
 ```bash
 # 1. point relay at your server (local or the deployed Railway URL)
-node "C:/Users/Cam Dowdle/source/repos/personal/relay/bin/relay.mjs" init \
+node "/path/to/relay/bin/relay.mjs" init \
   --url https://<your-app>.up.railway.app --token <WRITE_TOKEN>
 ```
 
@@ -29,10 +29,10 @@ started in that repo. Good for trying it out.
 {
   "hooks": {
     "Notification": [
-      { "hooks": [ { "type": "command", "command": "node \"C:/Users/Cam Dowdle/source/repos/personal/relay/hooks/notify-hook.mjs\"", "timeout": 10 } ] }
+      { "hooks": [ { "type": "command", "command": "node \"/path/to/relay/hooks/notify-hook.mjs\"", "timeout": 10 } ] }
     ],
     "Stop": [
-      { "hooks": [ { "type": "command", "command": "node \"C:/Users/Cam Dowdle/source/repos/personal/relay/hooks/stop-hook.mjs\"", "timeout": 10 } ] }
+      { "hooks": [ { "type": "command", "command": "node \"/path/to/relay/hooks/stop-hook.mjs\"", "timeout": 10 } ] }
     ]
   }
 }
@@ -41,7 +41,7 @@ started in that repo. Good for trying it out.
 ## Option B — global (every session, everywhere)
 
 This is what makes "Claude pings my phone whenever it needs me" true for *all* your work. Add the
-**same `hooks` object** to **`~/.claude/settings.json`** (`C:/Users/Cam Dowdle/.claude/settings.json`).
+**same `hooks` object** to your global **`~/.claude/settings.json`**.
 
 - **Back it up first** (`cp settings.json settings.json.bak`).
 - If a `hooks` key already exists, MERGE — append to the `Notification` / `Stop` arrays rather

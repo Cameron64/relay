@@ -6,7 +6,7 @@
 // purely additive alongside the CLI, the hooks, and the /relay skill.
 //
 // Register with Claude Code (point at the file in your main checkout once merged):
-//   claude mcp add relay -- node "C:/Users/Cam Dowdle/source/repos/personal/relay/bin/relay-mcp.mjs"
+//   claude mcp add relay -- node "/path/to/relay/bin/relay-mcp.mjs"
 //
 // STDIO HYGIENE (critical): on an MCP stdio server, STDOUT is the JSON-RPC channel — the SDK owns
 // it. NOTHING here may write to stdout (no console.log). All diagnostics go to stderr.
