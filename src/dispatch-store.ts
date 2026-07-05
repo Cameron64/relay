@@ -353,6 +353,25 @@ export function listTargets(): DispatchTarget[] {
     .all() as DispatchTarget[];
 }
 
+// --- session linkage (relay-roadmap Plan 03) ----------------------------------
+
+/**
+ * Map of claude_session -> most-recent dispatch id, for the Sessions dashboard (aggregateSessions
+ * in notify-log.ts) to link a session's notify-log row to the job that spawned it. Only rows with
+ * claude_session set are considered (a dispatch's claude_session is populated once the runner
+ * reports it via POST /dispatches/:id/status — see updateDispatchStatus). Ties (a resumed
+ * follow-up sharing the parent's session) resolve to the newest: rows are read oldest-first, so
+ * the last write into the map wins.
+ */
+export function latestDispatchIdBySession(): Map<string, string> {
+  const rows = db
+    .query("SELECT claude_session, id FROM dispatches WHERE claude_session IS NOT NULL ORDER BY created_at ASC")
+    .all() as { claude_session: string; id: string }[];
+  const map = new Map<string, string>();
+  for (const r of rows) map.set(r.claude_session, r.id);
+  return map;
+}
+
 // --- retention ---------------------------------------------------------------
 
 /**

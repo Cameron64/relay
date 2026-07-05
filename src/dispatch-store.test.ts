@@ -17,6 +17,7 @@ import {
   cancelDispatch,
   replaceTargetsForHost,
   listTargets,
+  latestDispatchIdBySession,
   pruneDispatches,
   __resetForTests,
 } from './dispatch-store.ts';
@@ -264,6 +265,36 @@ describe('updateDispatchStatus — legal transitions', () => {
       expect(r.value.claude_session).toBe('sess-1'); // preserved via COALESCE
       expect(r.value.result_summary).toBe('final summary');
     }
+  });
+});
+
+describe('latestDispatchIdBySession (relay-roadmap Plan 03 — Sessions dashboard linkage)', () => {
+  test('a dispatch with no claude_session set is never in the map', () => {
+    makeQueued(); // claude_session stays null until claimed+running reports one
+    expect(latestDispatchIdBySession().size).toBe(0);
+  });
+
+  test('a running/done dispatch with a reported claude_session is linked', () => {
+    const d = makeQueued();
+    claimDispatch(d.id, 'host1');
+    updateDispatchStatus(d.id, { status: 'running', claude_session: 'sess-1', result_summary: null, result_card_id: null });
+    const map = latestDispatchIdBySession();
+    expect(map.get('sess-1')).toBe(d.id);
+  });
+
+  test('two dispatches sharing a session (a resumed follow-up) resolve to the newest', async () => {
+    const first = makeQueued();
+    claimDispatch(first.id, 'host1');
+    updateDispatchStatus(first.id, { status: 'running', claude_session: 'sess-shared', result_summary: null, result_card_id: null });
+    updateDispatchStatus(first.id, { status: 'done', claude_session: null, result_summary: 'done', result_card_id: null });
+
+    await new Promise((r) => setTimeout(r, 3)); // ensure a distinct created_at ordering
+
+    const followUp = makeQueued({ resume_of: first.id }); // createDispatch copies the parent's claude_session
+    expect(followUp.claude_session).toBe('sess-shared');
+
+    const map = latestDispatchIdBySession();
+    expect(map.get('sess-shared')).toBe(followUp.id); // newest wins
   });
 });
 

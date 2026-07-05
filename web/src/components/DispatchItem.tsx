@@ -4,6 +4,7 @@ import { notifications } from '@mantine/notifications';
 import { cancelDispatch } from '../api';
 import { useFeed } from '../store/feed';
 import { timeAgo } from '../utils/markdown';
+import { scrollToCard } from '../utils/focus';
 import type { Dispatch } from '../types';
 
 // One dispatch's status card in the feed (relay-roadmap Plan 02) — title, target, a status badge,
@@ -29,15 +30,6 @@ const STATUS_LABEL: Record<Dispatch['status'], string> = {
   failed: 'failed',
   cancelled: 'cancelled',
 };
-
-// The result card (if any) is a separate row already in the SAME feed (the runner posts it via
-// POST /api/cards, which broadcasts + pushes on its own — see routes-cards.ts). Rather than
-// duplicate its content here, jump to it: CardView sets data-id={card.id} on its root, so this is
-// a plain in-page scroll, no routing needed.
-function scrollToCard(cardId: string): void {
-  const el = document.querySelector(`[data-id="${cardId}"]`);
-  el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-}
 
 export function DispatchItem({ dispatch, onFollowUp }: { dispatch: Dispatch; onFollowUp: (d: Dispatch) => void }) {
   const [busy, setBusy] = useState(false);

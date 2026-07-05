@@ -21,8 +21,10 @@ import { db } from './store.ts';
 // `relay notify`; 'mcp' is the relay_notify tool; 'card' is a card push (/api/cards); 'dispatch'
 // is the server's own "your queued job failed" push (see routes-dispatch.ts — a runner *success*
 // posts a result card, source 'card'; only *failure* has no card behind it, hence this source).
-// 'unknown' is the fallback for a caller that sent no source.
-export type NotifySource = 'notification' | 'stop' | 'cli' | 'mcp' | 'card' | 'dispatch' | 'unknown';
+// 'session' is the new SessionStart/SessionEnd hooks (relay-roadmap Plan 03) — always
+// deliver:false, audit-trail-only rows that feed aggregateSessions() below. 'unknown' is the
+// fallback for a caller that sent no source.
+export type NotifySource = 'notification' | 'stop' | 'cli' | 'mcp' | 'card' | 'dispatch' | 'session' | 'unknown';
 
 export type NotifyLogEntry = {
   id: string;
@@ -69,7 +71,7 @@ export type RecordNotifyInput = {
   delivered?: boolean | number; // default true (1); pass false for a logged-but-not-pushed row
 };
 
-const VALID_SOURCES = new Set<NotifySource>(['notification', 'stop', 'cli', 'mcp', 'card', 'dispatch', 'unknown']);
+const VALID_SOURCES = new Set<NotifySource>(['notification', 'stop', 'cli', 'mcp', 'card', 'dispatch', 'session', 'unknown']);
 
 let _ready = false;
 export function notifyLogReady(): boolean {
@@ -192,12 +194,14 @@ export function listNotifications(opts: { limit?: number; since?: string } = {})
 /**
  * Cap the log so it can't grow without bound on the volume. Deletes rows older than
  * NOTIFY_LOG_RETENTION_DAYS (default 30) and trims to the most recent NOTIFY_LOG_MAX rows
- * (default 2000). Cheap to call after each insert; mirrors pruneCards().
+ * (default 4000 — bumped from 2000 in Plan 03: SessionStart/SessionEnd hooks roughly double the
+ * write rate, but these rows are tiny so a bigger cap is cheap). Cheap to call after each insert;
+ * mirrors pruneCards().
  */
 export function pruneNotifyLog(): void {
   if (!_ready) return;
   const days = Number(process.env.NOTIFY_LOG_RETENTION_DAYS ?? 30);
-  const max = Number(process.env.NOTIFY_LOG_MAX ?? 2000);
+  const max = Number(process.env.NOTIFY_LOG_MAX ?? 4000);
   try {
     const tx = db.transaction(() => {
       if (days > 0) {
@@ -211,6 +215,120 @@ export function pruneNotifyLog(): void {
   } catch (err) {
     console.error('[notify-log] pruneNotifyLog failed (ignoring):', err);
   }
+}
+
+// --- session aggregation (relay-roadmap Plan 03) ----------------------------
+//
+// The Sessions dashboard is built ENTIRELY from this table (plus a caller-supplied dispatch
+// linkage — see the dispatchBySession param) — no new table, per the plan's "pure read" design.
+// Every push AND every silent session-start/session-end row already carries the canonical
+// attribution (session_id/cwd/project/host — master doc §3), so folding notify_log by session is
+// sufficient to answer "which sessions exist, what project, what state".
+
+export type SessionStatus = 'active' | 'needs-input' | 'ended' | 'stale';
+
+export type SessionSummary = {
+  sessionId: string | null;
+  project: string | null;
+  cwd: string | null;
+  host: string | null;
+  lastEvent: string;
+  lastAt: string;
+  status: SessionStatus;
+  dispatchId?: string;
+};
+
+const SESSION_WINDOW_HOURS_DEFAULT = Number(process.env.SESSION_WINDOW_HOURS ?? 24);
+const SESSION_ACTIVE_WINDOW_MINUTES_DEFAULT = Number(process.env.SESSION_ACTIVE_WINDOW_MINUTES ?? 30);
+
+// The status vocabulary this folds on is `event`, and `event` is NOT one uniform enum — it's
+// whatever the writer of that particular row set (see the gotcha in relay-roadmap 03's plan doc):
+//   - classifyNotification's own output ('idle' | 'permission' | 'other') for Notification-hook rows
+//   - a literal string set directly by a hook/route: 'done' (Stop), 'failed' (dispatch failure),
+//     'session-start' / 'session-end' (the new hooks below)
+//   - a card's `kind` for card-push rows (routes-cards.ts: `event: card.kind`) — approval/prompt/
+//     choice cards always carry respond buttons or options, so their push IS a needs-attention
+//     notification exactly like a permission prompt.
+// This set is deliberately the ONLY place that vocabulary is interpreted for status inference.
+const NEEDS_INPUT_EVENTS = new Set(['permission', 'approval', 'prompt', 'choice']);
+
+/**
+ * Pure fold: group notify_log rows into one summary per session (fallback key `cwd|host` when
+ * session_id is null — master doc §3) and derive a best-effort status from each group's newest
+ * row. Exported (and take rows as a plain argument, not a DB query) so the status-inference
+ * matrix — the only real logic in this plan — is unit-testable with synthetic rows.
+ */
+export function foldSessionRows(
+  rows: NotifyLogEntry[],
+  opts: { now?: Date; activeWindowMinutes?: number; dispatchBySession?: Map<string, string> } = {},
+): SessionSummary[] {
+  const now = opts.now ?? new Date();
+  const activeWindowMs = (opts.activeWindowMinutes ?? SESSION_ACTIVE_WINDOW_MINUTES_DEFAULT) * 60_000;
+
+  const groups = new Map<string, NotifyLogEntry[]>();
+  for (const row of rows) {
+    const key = row.session_id ? `sid:${row.session_id}` : `key:${row.cwd ?? ''}|${row.host ?? ''}`;
+    const list = groups.get(key);
+    if (list) list.push(row);
+    else groups.set(key, [row]);
+  }
+
+  const out: SessionSummary[] = [];
+  for (const list of groups.values()) {
+    // Newest first within the group. Callers typically already pass rows created_at DESC (the DB
+    // query below does), but don't rely on caller order — synthetic test rows may not be sorted.
+    const sorted = [...list].sort((a, b) => (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0));
+    const newest = sorted[0];
+    const lastEvent = newest.event ?? 'other';
+    const ageMs = now.getTime() - Date.parse(newest.created_at);
+
+    let status: SessionStatus;
+    if (lastEvent === 'session-end') status = 'ended';
+    else if (NEEDS_INPUT_EVENTS.has(lastEvent)) status = 'needs-input';
+    else if (Number.isFinite(ageMs) && ageMs <= activeWindowMs) status = 'active';
+    else status = 'stale';
+
+    const dispatchId = newest.session_id ? opts.dispatchBySession?.get(newest.session_id) : undefined;
+
+    out.push({
+      sessionId: newest.session_id,
+      project: newest.project,
+      cwd: newest.cwd,
+      host: newest.host,
+      lastEvent,
+      lastAt: newest.created_at,
+      status,
+      ...(dispatchId ? { dispatchId } : {}),
+    });
+  }
+
+  // needs-input first, then active, then stale, then ended; newest lastAt first within each bucket.
+  const RANK: Record<SessionStatus, number> = { 'needs-input': 0, active: 1, stale: 2, ended: 3 };
+  return out.sort((a, b) => {
+    const r = RANK[a.status] - RANK[b.status];
+    if (r !== 0) return r;
+    return a.lastAt < b.lastAt ? 1 : a.lastAt > b.lastAt ? -1 : 0;
+  });
+}
+
+/**
+ * DB-backed convenience wrapper the /api/sessions route calls: reads notify_log rows from the
+ * last `windowHours` (default SESSION_WINDOW_HOURS, 24) and folds them. No LIMIT on the query —
+ * the time window is the bound, and notify_log itself is already capped at NOTIFY_LOG_MAX rows
+ * total by pruneNotifyLog, so this can never run away even over a generous window. Returns []
+ * (rather than throwing) when the log isn't ready, mirroring listNotifications.
+ */
+export function aggregateSessions(
+  opts: { windowHours?: number; activeWindowMinutes?: number; dispatchBySession?: Map<string, string>; now?: Date } = {},
+): SessionSummary[] {
+  if (!_ready) return [];
+  const windowHours = opts.windowHours ?? SESSION_WINDOW_HOURS_DEFAULT;
+  const now = opts.now ?? new Date();
+  const cutoff = new Date(now.getTime() - windowHours * 3_600_000).toISOString();
+  const rows = db
+    .query('SELECT * FROM notify_log WHERE created_at > $since ORDER BY created_at DESC, id DESC')
+    .all({ $since: cutoff }) as NotifyLogEntry[];
+  return foldSessionRows(rows, { now, activeWindowMinutes: opts.activeWindowMinutes, dispatchBySession: opts.dispatchBySession });
 }
 
 /** Test-only: wipe the log. Guarded the same way cards-store's reset is. */

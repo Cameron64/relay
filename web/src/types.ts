@@ -37,6 +37,7 @@ export interface CardResponse {
 
 export interface CardSource {
   editable?: boolean;
+  sessionId?: string | null; // canonical attribution (master doc §3) — used by the Sessions dashboard
   cwd?: string;
   host?: string | null;
   placeholder?: string; // prompt cards: composer placeholder text (set by `relay ask --placeholder`)
@@ -44,8 +45,9 @@ export interface CardSource {
 }
 
 // One row of the notification audit trail (mirrors src/notify-log.ts NotifyLogEntry). Read back
-// by the Activity drawer to answer "why did I get that push, and which session sent it?".
-export type NotifySource = 'notification' | 'stop' | 'cli' | 'mcp' | 'card' | 'dispatch' | 'unknown';
+// by the Activity drawer to answer "why did I get that push, and which session sent it?". 'session'
+// is the SessionStart/SessionEnd hooks (relay-roadmap Plan 03) — always deliver:false.
+export type NotifySource = 'notification' | 'stop' | 'cli' | 'mcp' | 'card' | 'dispatch' | 'session' | 'unknown';
 
 export interface NotifyLogEntry {
   id: string;
@@ -128,4 +130,22 @@ export interface Dispatch {
 export interface DispatchTarget {
   id: string;
   label: string;
+}
+
+// One row of GET /api/sessions (mirrors src/notify-log.ts's SessionSummary — relay-roadmap Plan
+// 03). Event-derived, not process-level truth: a killed terminal never flips to 'ended' unless the
+// SessionEnd hook fired; until then it degrades to 'stale' after the active window.
+export type SessionStatus = 'active' | 'needs-input' | 'ended' | 'stale';
+
+export interface SessionSummary {
+  sessionId: string | null;
+  project: string | null;
+  cwd: string | null;
+  host: string | null;
+  lastEvent: string;
+  lastAt: string;
+  status: SessionStatus;
+  // Set when this session was spawned by the runner (dispatches.claude_session match) — links the
+  // row to its job actions (Cancel while queued / Follow-up once done).
+  dispatchId?: string;
 }

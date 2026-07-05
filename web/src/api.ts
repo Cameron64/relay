@@ -1,4 +1,4 @@
-import type { Card, CardResponse, Dispatch, DispatchTarget, NotifyLogEntry } from './types';
+import type { Card, CardResponse, Dispatch, DispatchTarget, NotifyLogEntry, SessionSummary } from './types';
 
 // All UI-side calls carry the relay_session httpOnly cookie (set at /api/unlock).
 export function api(path: string, opts: RequestInit = {}): Promise<Response> {
@@ -50,6 +50,30 @@ export async function fetchNotifications(limit = 100): Promise<NotificationsResu
   if (!res.ok) return { status: 'error' };
   const data = await res.json().catch(() => ({ notifications: [] }));
   return { status: 'ok', notifications: data.notifications || [] };
+}
+
+export type SessionsResult =
+  | { status: 'ok'; sessions: SessionSummary[]; window_hours: number }
+  | { status: 'unauth' }
+  | { status: 'warming' }
+  | { status: 'error' };
+
+// GET /api/sessions (relay-roadmap Plan 03) — the Sessions dashboard's one aggregation read, folded
+// server-side from notify-log + the dispatch runner's claude_session linkage. 503 = notify-log still
+// warming, same "warming" treatment as fetchNotifications.
+export async function fetchSessions(windowHours?: number): Promise<SessionsResult> {
+  const path = '/api/sessions' + (windowHours ? '?window_hours=' + encodeURIComponent(windowHours) : '');
+  let res: Response;
+  try {
+    res = await api(path);
+  } catch {
+    return { status: 'error' };
+  }
+  if (res.status === 401) return { status: 'unauth' };
+  if (res.status === 503) return { status: 'warming' };
+  if (!res.ok) return { status: 'error' };
+  const data = await res.json().catch(() => ({ sessions: [], window_hours: 24 }));
+  return { status: 'ok', sessions: data.sessions || [], window_hours: Number(data.window_hours) || 24 };
 }
 
 export async function unlock(token: string): Promise<{ ok: boolean; status: number }> {

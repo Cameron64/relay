@@ -14,6 +14,15 @@
 export const focusCardId: string | null = new URLSearchParams(window.location.search).get('card');
 export const replyRequested: boolean = new URLSearchParams(window.location.search).get('reply') === '1';
 
+// Scroll an already-rendered card into view by id. CardView sets data-id={card.id} on its MCard
+// root, so this is a plain in-page DOM lookup — no routing needed. Shared by DispatchItem's "View
+// result" button and SessionsPanel's "Answer it" action (relay-roadmap Plan 03), both of which
+// jump to a card that's already in the SAME feed rather than duplicating its content.
+export function scrollToCard(cardId: string): void {
+  const el = document.querySelector(`[data-id="${cardId}"]`);
+  el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
 let handled = false;
 
 export function claimFocus(id: string): boolean {

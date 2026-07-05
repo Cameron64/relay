@@ -1,7 +1,8 @@
 # Wiring the Relay hooks into Claude Code
 
-The three hooks make your phone ping automatically — and, for PreToolUse, let you approve/deny
-tool calls from the phone when you're AFK:
+These hooks make your phone ping automatically — and, for PreToolUse, let you approve/deny
+tool calls from the phone when you're AFK. SessionStart/SessionEnd are the odd ones out: they
+never push, they only feed the Sessions dashboard's audit trail.
 
 - **Notification** → "Claude Code: &lt;message&gt;" whenever Claude is waiting on you.
 - **Stop** → "✅ &lt;label&gt; — done" when a turn ends, **but only if** you ran
@@ -9,8 +10,12 @@ tool calls from the phone when you're AFK:
 - **PreToolUse** (`pretool-hook.mjs`) → **triple-gated**: only intercepts when config exists AND
   `relay afk on` is flagged AND `~/.relay/permission-rules.json` has a matching rule. See
   "PreToolUse — the AFK permission bridge" below for the full picture.
+- **SessionStart** (`session-start-hook.mjs`) / **SessionEnd** (`session-end-hook.mjs`) →
+  relay-roadmap Plan 03: silent (`deliver:false`) audit-trail rows, no push, no approval flow.
+  They're what lets the PWA's Sessions view show "which sessions exist right now" and flip a
+  session to 'ended' when it closes cleanly.
 
-All three are **inert until `~/.relay/config.json` exists** (run `relay init` first), hard-timeout
+All are **inert until `~/.relay/config.json` exists** (run `relay init` first), hard-timeout
 fast, and always exit 0 — they can't hang or break a session. (PreToolUse's *decision* — allow /
 deny / ask — is JSON on stdout, not a non-zero exit; see below.)
 
@@ -41,6 +46,12 @@ started in that repo. Good for trying it out.
     ],
     "PreToolUse": [
       { "matcher": "*", "hooks": [ { "type": "command", "command": "node \"C:/Users/Cam Dowdle/source/repos/personal/relay/hooks/pretool-hook.mjs\"", "timeout": 600 } ] }
+    ],
+    "SessionStart": [
+      { "hooks": [ { "type": "command", "command": "node \"C:/Users/Cam Dowdle/source/repos/personal/relay/hooks/session-start-hook.mjs\"", "timeout": 10 } ] }
+    ],
+    "SessionEnd": [
+      { "hooks": [ { "type": "command", "command": "node \"C:/Users/Cam Dowdle/source/repos/personal/relay/hooks/session-end-hook.mjs\"", "timeout": 10 } ] }
     ]
   }
 }
@@ -58,8 +69,8 @@ This is what makes "Claude pings my phone whenever it needs me" true for *all* y
 **same `hooks` object** to **`~/.claude/settings.json`** (`C:/Users/Cam Dowdle/.claude/settings.json`).
 
 - **Back it up first** (`cp settings.json settings.json.bak`).
-- If a `hooks` key already exists, MERGE — append to the `Notification` / `Stop` / `PreToolUse`
-  arrays rather than replacing the object. Don't touch other keys.
+- If a `hooks` key already exists, MERGE — append to the `Notification` / `Stop` / `PreToolUse` /
+  `SessionStart` / `SessionEnd` arrays rather than replacing the object. Don't touch other keys.
 - `timeout` is in **seconds**.
 
 ## PreToolUse — the AFK permission bridge
@@ -102,6 +113,11 @@ relay arm "smoke test"     # then end the turn → expect "✅ smoke test — do
 ```
 
 For PreToolUse, do the `relay afk on` smoke test above.
+
+For SessionStart/SessionEnd: start (then end) a Claude Code session with the hooks wired, open
+the PWA, and check Activity for two `session` rows (`Session started` / `Session ended`) tagged
+🔕 silenced — they never buzz the phone. The Sessions view (Plan 03) should show that session as
+`ended` once the SessionEnd row lands.
 
 ## Turn it off
 

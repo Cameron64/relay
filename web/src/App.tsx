@@ -5,6 +5,7 @@ import { TopBar } from './components/TopBar';
 import { UnlockScreen } from './components/UnlockScreen';
 import { Feed } from './components/Feed';
 import { Compose } from './components/Compose';
+import { Activity } from './components/Activity';
 import { useSSE } from './hooks/useSSE';
 import { useFeed } from './store/feed';
 import { fetchCards, fetchDispatches } from './api';
@@ -32,6 +33,16 @@ export function App() {
     setComposeResumeOf(d.id);
     setComposeLockedTarget(d.target);
     setComposeOpen(true);
+  }, []);
+
+  // Activity drawer state, lifted here (same pattern as Compose above) so both TopBar's own
+  // "Activity" button (no filter) and SessionsPanel's "otherwise, open Activity pre-filtered to
+  // this session" row action (relay-roadmap Plan 03) can open the SAME drawer instance.
+  const [activityOpen, setActivityOpen] = useState(false);
+  const [activitySessionFilter, setActivitySessionFilter] = useState<string | null>(null);
+  const openActivity = useCallback((sessionId?: string | null) => {
+    setActivitySessionFilter(sessionId ?? null);
+    setActivityOpen(true);
   }, []);
 
   // GET /api/cards: 200 -> populate + feed; 401/error -> unlock; 503 -> feed (warming, SSE backfills).
@@ -80,7 +91,13 @@ export function App() {
           background: 'var(--mantine-color-body)',
         }}
       >
-        <TopBar showLock={view === 'feed'} onLock={onLock} onCompose={view === 'feed' ? openCompose : undefined} />
+        <TopBar
+          showLock={view === 'feed'}
+          onLock={onLock}
+          onCompose={view === 'feed' ? openCompose : undefined}
+          onFollowUp={view === 'feed' ? openFollowUp : undefined}
+          onOpenActivity={view === 'feed' ? openActivity : undefined}
+        />
       </Box>
       <Container size="sm" py="md">
         {view === 'loading' ? (
@@ -94,6 +111,7 @@ export function App() {
         )}
       </Container>
       <Compose opened={composeOpen} onClose={() => setComposeOpen(false)} resumeOf={composeResumeOf} lockedTarget={composeLockedTarget} />
+      <Activity opened={activityOpen} onClose={() => setActivityOpen(false)} initialSessionId={activitySessionFilter} />
     </>
   );
 }

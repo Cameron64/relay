@@ -15,6 +15,7 @@
 //   POST /api/cards/:id/agent-events  append a thread event, role:'agent'      (write)
 //   GET  /api/cards/:id/agent-events  list/long-poll events (?since_seq&wait)  (write)
 //   GET  /api/cards/:id/asset/:aid    image bytes                              (UI)
+//   GET  /api/sessions                dashboard rows folded from notify-log     (UI)
 //
 // The events endpoints are deliberately split into a UI path and a write path (rather than one
 // handler composing both auth middlewares) so the auth split stays legible — master doc §6.
@@ -24,8 +25,9 @@ import type { Context } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { requireUi, requireWrite, handleUnlock } from './session.ts';
 import * as cards from './cards-store.ts';
+import * as dispatch from './dispatch-store.ts';
 import { isPushConfigured, sendPushToAll } from './push.ts';
-import { recordNotify, listNotifications, notifyLogReady, pruneNotifyLog } from './notify-log.ts';
+import { recordNotify, listNotifications, notifyLogReady, pruneNotifyLog, aggregateSessions } from './notify-log.ts';
 import { waitForResponse, resolveWaiters } from './waiters.ts';
 import { waitForEvents, notifyEventWaiters } from './event-waiters.ts';
 import { addClient, removeClient, hubSize, broadcast } from './stream.ts';
@@ -211,6 +213,20 @@ appRoutes.get('/notifications', requireUi, (c) => {
   const since = c.req.query('since') || undefined;
   const limit = Number(c.req.query('limit') || '100');
   return c.json({ notifications: listNotifications({ since, limit: Number.isFinite(limit) ? limit : 100 }) });
+});
+
+// --- session dashboard (UI side) --------------------------------------------
+// One row per Claude session seen in the last `window_hours` (default SESSION_WINDOW_HOURS, 24),
+// derived entirely from the notify-log audit trail (plus the runner's claude_session linkage —
+// relay-roadmap Plan 03). Pure read: no new table, no process-level truth (see the plan's
+// Non-goals — a killed terminal never flips to "ended" without the SessionEnd hook firing).
+appRoutes.get('/sessions', requireUi, (c) => {
+  if (!notifyLogReady()) return c.json({ error: 'notification log unavailable' }, 503);
+  const windowHoursRaw = Number(c.req.query('window_hours'));
+  const windowHours = Number.isFinite(windowHoursRaw) && windowHoursRaw > 0 ? windowHoursRaw : undefined;
+  const dispatchBySession = dispatch.dispatchReady() ? dispatch.latestDispatchIdBySession() : undefined;
+  const sessions = aggregateSessions({ windowHours, dispatchBySession });
+  return c.json({ sessions, window_hours: windowHours ?? Number(process.env.SESSION_WINDOW_HOURS ?? 24) });
 });
 
 appRoutes.get('/cards/:id', requireUi, (c) => {

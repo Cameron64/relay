@@ -88,6 +88,10 @@ A Vite + React + TypeScript SPA on Mantine. Notable pieces:
   subscribe).
 - `web/src/components/Compose.tsx` / `DispatchItem.tsx` — the phone-brainstorm compose view (opened
   from TopBar's `+`) and the dispatch status card `Feed.tsx` interleaves with regular cards.
+- `web/src/components/SessionsPanel.tsx` / `Activity.tsx` — the Sessions dashboard (Plan 03) and
+  the notification audit drawer. Activity's open/close + session-filter state is lifted to
+  `App.tsx` (same pattern as `Compose`) so SessionsPanel's "open Activity for this session" row
+  action and TopBar's own "Activity" button share one drawer instance.
 - `web/src/service-worker.js` — Workbox `injectManifest` precache + Relay's push handlers; emitted
   to `dist/service-worker.js` (same url as before, so existing clients upgrade in place).
 
@@ -212,9 +216,9 @@ side-effect-free HTTP client) plus the CLI's payload builders, so tool output ma
 
 ## Claude Code hooks
 
-Three hooks (in `hooks/`) make the phone ping automatic. They are **inert until
-`~/.relay/config.json` exists**, hard-timeout fast, and always exit 0 — so they can never hang
-or break a session.
+Five hooks (in `hooks/`) make the phone ping automatic — and feed the Sessions dashboard. They are
+**inert until `~/.relay/config.json` exists**, hard-timeout fast, and always exit 0 — so they can
+never hang or break a session.
 
 - **Notification** → pushes "Claude needs you" when Claude is waiting on you.
 - **Stop** → if you ran `relay arm "<label>"` this session, pushes "✅ &lt;label&gt; — done" when
@@ -230,10 +234,31 @@ or break a session.
   to `ask` — the normal terminal prompt — **never** to auto-allow. See
   `hooks/permission-rules.example.json` for the rule file shape; copy it to
   `~/.relay/permission-rules.json` to opt in (no file = the hook never intercepts, even AFK).
+- **SessionStart** / **SessionEnd** (`session-start-hook.mjs` / `session-end-hook.mjs`) → silent
+  (`deliver:false`) audit-trail rows — no push, ever. They're what the Sessions dashboard (see
+  below) folds to answer "which sessions exist right now" and to flip a session to `ended` when it
+  closes cleanly, instead of leaving it `stale` forever.
 
 Wiring is opt-in (see `hooks/SETUP.md`): project-local `relay/.claude/settings.json` scopes the
 hooks to this repo; promote to `~/.claude/settings.json` for every session everywhere. To turn
 them off, remove the `hooks` block (or delete `~/.relay/config.json` to make them inert again).
+
+## Sessions dashboard
+
+The PWA's **Sessions** button (TopBar, next to Activity) answers "which Claude sessions exist
+right now, what project, what state, and does it need me" — built entirely from data Relay already
+collects: the notify-log audit trail (pushes + the silent SessionStart/SessionEnd rows above) plus
+the dispatch runner's `claude_session` linkage. No new table; `GET /api/sessions` folds it fresh on
+every request (`src/notify-log.ts`'s `aggregateSessions`/`foldSessionRows`).
+
+Each row gets a best-effort status — `needs-input` (last event was a permission prompt or an
+approval/prompt/choice card push), `active` (something happened recently), `stale` (nothing in the
+last 30 min, session never ended), or `ended` (the SessionEnd hook fired) — sorted needs-input
+first. This is an **event-derived view, not process-level truth**: a killed terminal never reports
+`ended` unless the hook fired; that's the honest `stale` case, not a bug. A row spawned by the
+dispatch runner (Plan 02) surfaces the SAME Cancel/Follow-up actions as its `DispatchItem` in the
+feed; a `needs-input` row with a pending card deep-links straight to it ("Answer it"); anything
+else opens the Activity drawer pre-filtered to that session.
 
 ## Deploy (Railway)
 
@@ -276,3 +301,4 @@ API with no frontend.
 | POST | `/api/dispatches/:id/status` | write | `running`\|`done`\|`failed`, legal transitions only |
 | GET | `/api/dispatch-targets` | UI | union of every runner's announced `{id,label}` targets |
 | POST | `/api/dispatch-targets` | write | a runner replaces its own target list wholesale |
+| GET | `/api/sessions?window_hours=N` | UI | Sessions dashboard rows, folded from notify-log + dispatch linkage |
