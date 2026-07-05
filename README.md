@@ -200,7 +200,7 @@ hand. It's a thin **local client** of the deployed API: it reads the same `~/.re
 Register it (point at the file in your checkout):
 
 ```bash
-claude mcp add relay -- node "C:/Users/Cam Dowdle/source/repos/personal/relay/bin/relay-mcp.mjs"
+claude mcp add relay -- node "/path/to/relay/bin/relay-mcp.mjs"
 ```
 
 | Tool | Blocks? | Purpose |

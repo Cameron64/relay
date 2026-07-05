@@ -181,7 +181,7 @@ describe('browserOpenCommand', () => {
 });
 
 describe('isSameOrigin (auto-open safety gate)', () => {
-  const cfg = 'https://relay-production-6ebb.up.railway.app';
+  const cfg = 'https://your-app.up.railway.app';
   test('assembled card URL matches the configured origin', () => {
     expect(isSameOrigin(cfg + '/?card=00aabb11ccdd2233', cfg)).toBe(true);
   });
