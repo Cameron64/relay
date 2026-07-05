@@ -148,6 +148,24 @@ export async function postCardEvent(cardId: string, type: 'message' | 'payload',
   return { status: 'ok', event: d.event };
 }
 
+// Fetch a card's full thread (UI side, GET /api/cards/:id/events — no wait, one-shot). Used by
+// Thread.tsx (Plan 04) to hydrate a card's events slice the first time it's needed; after that,
+// the SSE 'card-event' broadcast (see useSSE.ts) keeps it live without re-fetching.
+export type CardEventsResult = { status: 'ok'; events: CardEvent[] } | { status: 'notfound' } | { status: 'error' };
+
+export async function fetchCardEvents(cardId: string): Promise<CardEventsResult> {
+  let res: Response;
+  try {
+    res = await api(`/api/cards/${cardId}/events`);
+  } catch {
+    return { status: 'error' };
+  }
+  if (res.status === 404) return { status: 'notfound' };
+  if (!res.ok) return { status: 'error' };
+  const data = await res.json().catch(() => ({ events: [] }));
+  return { status: 'ok', events: data.events || [] };
+}
+
 // Clear a card from the feed. Fire-and-forget from the UI's perspective: the optimistic local
 // remove already happened, and a card-removed SSE will reconcile other tabs.
 export async function dismiss(cardId: string): Promise<boolean> {

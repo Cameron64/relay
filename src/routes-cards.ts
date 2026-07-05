@@ -9,7 +9,7 @@
 //   GET  /api/cards/:id               one card                                 (UI)
 //   POST /api/cards/:id/respond       record verdict, resolve --wait + SSE     (UI)
 //   POST /api/cards/:id/dismiss       clear a card from the feed               (UI)
-//   GET  /api/cards/:id/response      long-poll the verdict (?wait=N)          (write)
+//   GET  /api/cards/:id/response      long-poll the verdict (?wait=N&events_since=SEQ) (write)
 //   POST /api/cards/:id/events        append a thread event, role:'user'       (UI)
 //   GET  /api/cards/:id/events        list/long-poll events (?since_seq&wait)  (UI)
 //   POST /api/cards/:id/agent-events  append a thread event, role:'agent'      (write)
@@ -19,6 +19,12 @@
 //
 // The events endpoints are deliberately split into a UI path and a write path (rather than one
 // handler composing both auth middlewares) so the auth split stays legible — master doc §6.
+//
+// Plan 04 (card threads): the write-side /response poll gains an OPT-IN &events_since=SEQ param
+// (see the handler below) — a caller that omits it gets byte-identical behavior to before this
+// plan (master doc §4's frozen verdict contract; every existing CLI/MCP/hook caller keeps working
+// unchanged). With it, the poll also resolves early on a new role:'user' card_event, so an agent
+// blocked on --wait sees a clarifying question instead of just timing out.
 
 import { Hono } from 'hono';
 import type { Context } from 'hono';
@@ -28,7 +34,7 @@ import * as cards from './cards-store.ts';
 import * as dispatch from './dispatch-store.ts';
 import { isPushConfigured, sendPushToAll } from './push.ts';
 import { recordNotify, listNotifications, notifyLogReady, pruneNotifyLog, aggregateSessions } from './notify-log.ts';
-import { waitForResponse, resolveWaiters } from './waiters.ts';
+import { waitForResponse, resolveWaiters, waitForResponseOrEvent } from './waiters.ts';
 import { waitForEvents, notifyEventWaiters } from './event-waiters.ts';
 import { addClient, removeClient, hubSize, broadcast } from './stream.ts';
 
@@ -302,20 +308,56 @@ appRoutes.post('/cards/:id/dismiss', requireUi, async (c) => {
 });
 
 // --- long-poll the verdict (Claude side) -----------------------------------
+// Plan 04: &events_since=SEQ is OPT-IN thread awareness. Omitted (every caller before this plan,
+// and Plan 01's permission hook, which never sends it — permission cards stay verdict-only) takes
+// the "legacy path" below, byte-identical to the route's behavior before this plan. Provided, the
+// poll ALSO resolves early on a new role:'user' card_event (> SEQ) — the human asked a question
+// instead of answering yet — and both branches echo the card's current event list back for
+// context (master doc: "events = full list, so the agent has context").
 appRoutes.get('/cards/:id/response', requireWrite, async (c) => {
   if (!cards.cardsReady()) return notReady(c);
   const id = c.req.param('id') as string;
   const card = cards.getCard(id);
   if (!card) return c.json({ error: 'not found' }, 404);
-  if (card.status === 'responded') return c.json({ status: 'responded', response: card.response });
+  const sinceParam = c.req.query('events_since');
+  // 0 is a valid sinceSeq (seq starts at 1, so "since 0" means "every event so far") — only an
+  // ABSENT param means "no thread awareness at all", so this can't just be `Number(...) || undefined`.
+  const sinceSeq = sinceParam !== undefined ? Math.max(0, Math.floor(Number(sinceParam)) || 0) : undefined;
+
+  if (card.status === 'responded') {
+    return c.json(
+      sinceSeq === undefined
+        ? { status: 'responded', response: card.response }
+        : { status: 'responded', response: card.response, events: cards.listCardEvents(id) },
+    );
+  }
   // Dismissed cards are marked for deletion (expires_at set) but linger until the next
   // sweepExpired() tick — resolve pollers immediately instead of making them wait out the sweep.
   if (card.status === 'dismissed') return c.json({ error: 'not found' }, 404);
+
   const waitN = Number(c.req.query('wait') || '0');
   const waitMs = Math.min(Math.max(Number.isFinite(waitN) ? waitN : 0, 0), 55) * 1000;
+
+  if (sinceSeq === undefined) {
+    // Legacy path — exactly the route's behavior before Plan 04, no thread awareness at all.
+    if (waitMs <= 0) return c.json({ status: 'pending' });
+    const resp = await waitForResponse(id, waitMs);
+    if (resp) return c.json({ status: 'responded', response: resp });
+    return c.json({ status: 'pending' });
+  }
+
+  // Only a role:'user' event counts as "the human asked something" — an agent's own agent-events
+  // writes must never wake its own poll (it already knows what it just wrote there).
+  const alreadyNew = cards.listCardEvents(id, { sinceSeq }).some((e) => e.role === 'user');
+  if (alreadyNew) return c.json({ status: 'event', events: cards.listCardEvents(id, { sinceSeq }) });
   if (waitMs <= 0) return c.json({ status: 'pending' });
-  const resp = await waitForResponse(id, waitMs);
-  if (resp) return c.json({ status: 'responded', response: resp });
+
+  const woke = await waitForResponseOrEvent(id, waitMs);
+  if (woke.kind === 'responded') return c.json({ status: 'responded', response: woke.resp, events: cards.listCardEvents(id) });
+  if (woke.kind === 'event') {
+    const events = cards.listCardEvents(id, { sinceSeq });
+    if (events.some((e) => e.role === 'user')) return c.json({ status: 'event', events });
+  }
   return c.json({ status: 'pending' });
 });
 
@@ -323,8 +365,17 @@ appRoutes.get('/cards/:id/response', requireWrite, async (c) => {
 // Append-only richer channel alongside the frozen single-verdict `response` (master doc §4). See
 // the card_events table + appendCardEvent/listCardEvents in cards-store.ts. `role` is fixed per
 // route (never read from the request body) — the UI path always writes/reads role:'user', the
-// write-token path always writes/reads role:'agent'. No push notification on append; events are
-// silent in this plan (Plan 04 decides push behavior for threads).
+// write-token path always writes/reads role:'agent'.
+//
+// Plan 04 push rule: a role:'agent' text message pushes (the agent is STILL BLOCKED waiting on a
+// verdict — Cam should know it said something); a role:'user' append never pushes (Cam wrote it —
+// pushing his own message back to his own phone would be pointless), matching master §6's split
+// (only the write side triggers outbound notifications). 'payload' events (Plan 05's structured
+// page-submit data) aren't human-readable thread text, so they don't push either.
+export function shouldPushThreadReply(role: cards.CardEventRole, type: cards.CardEventType): boolean {
+  return role === 'agent' && type === 'message';
+}
+
 function eventsPostHandler(role: cards.CardEventRole) {
   return async (c: Context) => {
     if (!cards.cardsReady()) return notReady(c);
@@ -344,6 +395,46 @@ function eventsPostHandler(role: cards.CardEventRole) {
     }
     notifyEventWaiters(id);
     await broadcast('card-event', { cardId: id, event: result.value });
+
+    if (shouldPushThreadReply(role, v.value.type) && isPushConfigured()) {
+      const card = cards.getCard(id);
+      if (card) {
+        const cardUrl = '/?card=' + id;
+        const pushBody = v.value.body.length > 200 ? v.value.body.slice(0, 200) + '…' : v.value.body;
+        try {
+          const pushResult = await sendPushToAll({
+            title: card.title,
+            body: pushBody,
+            url: cardUrl,
+            tag: id,
+            cardId: id,
+            urgency: 'high',
+          });
+          const src = (card.source ?? {}) as Record<string, unknown>;
+          const cwd = typeof src.cwd === 'string' ? src.cwd : null;
+          recordNotify({
+            source: 'card',
+            title: card.title,
+            body: pushBody,
+            tag: id,
+            url: cardUrl,
+            sessionId: typeof src.sessionId === 'string' ? src.sessionId : null,
+            cwd,
+            project: cwd ? cwd.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || null : null,
+            host: typeof src.host === 'string' ? src.host : null,
+            event: 'thread-reply',
+            cardId: id,
+            sent: pushResult.sent,
+            failed: pushResult.failed,
+            subscribers: pushResult.total,
+          });
+          pruneNotifyLog();
+        } catch (err) {
+          console.error('[cards] thread-reply push failed:', err);
+        }
+      }
+    }
+
     return c.json({ ok: true, event: result.value });
   };
 }

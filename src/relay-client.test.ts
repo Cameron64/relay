@@ -4,7 +4,7 @@
 // 503-is-soft handling.
 import { test, expect, describe, afterEach } from 'bun:test';
 // @ts-ignore — zero-dep .mjs client has no .d.ts
-import { createCard, pollResponse, sendNotify, getCardEvents } from '../lib/relay-client.mjs';
+import { createCard, pollResponse, sendNotify, getCardEvents, appendAgentEvent } from '../lib/relay-client.mjs';
 
 const cfg = { url: 'https://relay.test', writeToken: 'tok' };
 const realFetch = globalThis.fetch;
@@ -90,6 +90,56 @@ describe('pollResponse', () => {
     queueFetch([new Error('ECONNRESET'), res({ json: { status: 'responded', response: { verdict: 'approved' } } })]);
     const r = await pollResponse(cfg, 'id1', 50);
     expect(r.status).toBe('responded');
+  });
+
+  // relay-roadmap Plan 04 — card threads.
+  describe('eventsSince (Plan 04)', () => {
+    test('omitted: the request URL carries no events_since param (legacy byte-identical request)', async () => {
+      const calls = queueFetch([res({ json: { status: 'responded', response: { verdict: 'approved' } } })]);
+      await pollResponse(cfg, 'id1', 50);
+      expect(calls[0].url).not.toContain('events_since');
+    });
+
+    test('0 is a valid value (not treated as "omitted")', async () => {
+      const calls = queueFetch([res({ json: { status: 'pending' } })]);
+      await pollResponse(cfg, 'id1', 0, 0);
+      // budget 0 -> no fetch happens at all (same short-circuit as the no-eventsSince case), so
+      // assert on a nonzero budget instead so the URL actually gets built.
+      expect(calls.length).toBe(0);
+    });
+
+    test('a positive eventsSince is appended to the request URL', async () => {
+      // 'responded' (not 'pending') so the loop exits on the first fetch — a queued 'pending'
+      // response would spin the internal poll loop for the whole totalSecs budget, real wall time.
+      const calls = queueFetch([res({ json: { status: 'responded', response: { verdict: 'approved' } } })]);
+      await pollResponse(cfg, 'id1', 5, 3);
+      expect(calls[0].url).toContain('events_since=3');
+    });
+
+    test('resolves on status "event" without waiting out the full budget', async () => {
+      const calls = queueFetch([res({ json: { status: 'event', events: [{ seq: 1, role: 'user', type: 'message', body: 'why?' }] } })]);
+      const r = await pollResponse(cfg, 'id1', 50, 0);
+      expect(r.status).toBe('event');
+      expect(r.events).toHaveLength(1);
+      expect(calls[0].url).toContain('events_since=0');
+    });
+  });
+});
+
+describe('appendAgentEvent', () => {
+  test('POSTs a role:agent message event to /agent-events with the write token', async () => {
+    const calls = queueFetch([res({ json: { ok: true, event: { card_id: 'id1', seq: 4, role: 'agent', type: 'message', body: 'got it', at: 't' } } })]);
+    const r = await appendAgentEvent(cfg, 'id1', 'got it');
+    expect(calls[0].url).toBe('https://relay.test/api/cards/id1/agent-events');
+    expect(calls[0].opts.method).toBe('POST');
+    expect(calls[0].opts.headers['x-write-token']).toBe('tok');
+    expect(JSON.parse(calls[0].opts.body)).toEqual({ type: 'message', body: 'got it' });
+    expect(r.event.seq).toBe(4);
+  });
+
+  test('throws "HTTP <status>" on a non-OK response', async () => {
+    queueFetch([res({ status: 409, text: 'card is not pending' })]);
+    await expect(appendAgentEvent(cfg, 'id1', 'x')).rejects.toThrow(/HTTP 409/);
   });
 });
 

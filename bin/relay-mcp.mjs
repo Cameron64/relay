@@ -23,7 +23,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { pathToFileURL } from 'node:url';
 import { loadConfig, projectFromCwd, sessionIdFromEnv } from '../lib/relay-lib.mjs';
-import { createCard, pollResponse, sendNotify, getCardEvents } from '../lib/relay-client.mjs';
+import { createCard, pollResponse, sendNotify, getCardEvents, appendAgentEvent } from '../lib/relay-client.mjs';
 import { buildCardPayload, buildChoicePayload, buildAskPayload, buildPagePayload, parseTtl, VERDICT_ALIAS } from './relay.mjs';
 
 const DEFAULT_WAIT = 50; // seconds; one bounded server long-poll, safely under a typical MCP timeout
@@ -139,13 +139,28 @@ export function pageArgsToPayload(args, ctx = {}) {
   });
 }
 
-// Normalize a pollResponse() result into the single JSON object a blocking tool returns.
+// Normalize a pollResponse() result into the single JSON object a blocking tool returns. Plan 04
+// (card threads): a poll made with eventsSince (relay_poll, or the settle() default below) can
+// come back as status:'event' — the human asked something instead of answering yet — instead of
+// swallowing that as a plain timeout. `sinceSeq` (the highest seq seen) is echoed back so the
+// caller's next relay_poll call knows where to resume without re-seeing the same message.
 export function formatResponse(pollResult, id) {
   if (!pollResult || pollResult.status === 'notfound') {
     return { status: 'notfound', id, message: 'Card not found — it expired or was dismissed.' };
   }
   if (pollResult.status === 'pending') {
     return { status: 'pending', id, message: `No response yet. Call relay_poll with id "${id}" to keep waiting.` };
+  }
+  if (pollResult.status === 'event') {
+    const events = pollResult.events || [];
+    const sinceSeq = events.length ? events[events.length - 1].seq : 0;
+    return {
+      status: 'event',
+      id,
+      events,
+      sinceSeq,
+      message: `The human sent a message instead of answering yet — read events[], answer with relay_reply({id:"${id}", body:"..."}), then call relay_poll({id:"${id}", eventsSince:${sinceSeq}}) to keep waiting for the actual verdict.`,
+    };
   }
   const r = pollResult.response || {};
   const isReply = r.verdict === 'reply'; // a prompt card's free-text answer (relay_ask)
@@ -334,13 +349,32 @@ Richer starting points (chart / dataviz / simulation / 3d / explainer) live in t
   {
     name: 'relay_poll',
     description:
-      'Resume waiting for a response to a card created earlier by relay_ask / relay_choice / relay_card that returned status "pending". Blocks up to waitSeconds (default 50). Returns status answered | pending | notfound.',
+      'Resume waiting for a response to a card created earlier by relay_ask / relay_choice / relay_card / relay_page that returned status "pending" or "event". Blocks up to waitSeconds (default 50). Returns status answered | event | pending | notfound. On "event" the human sent a thread message instead of answering yet — read events[], answer with relay_reply, then call relay_poll again with eventsSince set to the returned sinceSeq.',
     inputSchema: {
       type: 'object',
       required: ['id'],
       properties: {
         id: { type: 'string', description: 'The card id returned by the earlier call.' },
         waitSeconds: { type: 'number', description: 'Block up to N seconds (<=280, default 50). 0 = check once, do not block.' },
+        eventsSince: {
+          type: 'number',
+          description:
+            'Card threads (relay-roadmap Plan 04): also resolve early if a NEW human thread message lands (> this seq). Omit to poll for the verdict only, exactly as before this existed. Pass the "sinceSeq" a prior "event" result returned to keep resuming the thread.',
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'relay_reply',
+    description:
+      'Reply into a card\'s thread WITHOUT resolving its verdict — use after relay_card / relay_ask / relay_choice / relay_poll returns status "event" (the human asked a clarifying question instead of answering yet). After sending, call relay_poll again (with eventsSince set to the seq this call returns) to keep waiting for the actual verdict.',
+    inputSchema: {
+      type: 'object',
+      required: ['id', 'body'],
+      properties: {
+        id: { type: 'string', description: 'The card id.' },
+        body: { type: 'string', description: 'Your reply text (plain text or markdown).' },
       },
       additionalProperties: false,
     },
@@ -349,11 +383,15 @@ Richer starting points (chart / dataviz / simulation / 3d / explainer) live in t
 
 // --- dispatch --------------------------------------------------------------
 
-// Create a card, then either return its id (wait==0) or block on the bounded poll and format the verdict.
+// Create a card, then either return its id (wait==0) or block on the bounded poll and format the
+// verdict. eventsSince:0 (Plan 04) means "surface a thread message instead of swallowing it as a
+// plain timeout" — relay_card/relay_ask/relay_choice's blocking path always wants that; a caller
+// who genuinely doesn't care about threads just gets 'event' back and can treat it like 'pending'
+// (re-poll), so this is a strictly additive change to what settle() already returned.
 async function settle(cfg, created, waitSeconds, def) {
   const wait = resolveWait(waitSeconds, def);
   if (wait === 0) return okResult({ status: 'created', id: created.id, url: created.url });
-  const res = await pollResponse(cfg, created.id, wait);
+  const res = await pollResponse(cfg, created.id, wait, 0);
   return okResult(formatResponse(res, created.id));
 }
 
@@ -425,11 +463,22 @@ export async function handleCall(name, rawArgs) {
       }
       case 'relay_poll': {
         if (!args.id) return errResult('relay_poll: id is required');
-        const res = await pollResponse(cfg, args.id, resolveWait(args.waitSeconds, DEFAULT_WAIT));
+        // eventsSince is OPT-IN (undefined by default) — a caller resuming a relay_page wait (or
+        // any other non-thread flow) that never passes it gets the exact pre-Plan-04 behavior;
+        // this only activates thread awareness when the caller explicitly asks for it.
+        const eventsSince = args.eventsSince != null ? Math.max(0, Math.floor(Number(args.eventsSince)) || 0) : undefined;
+        const res = await pollResponse(cfg, args.id, resolveWait(args.waitSeconds, DEFAULT_WAIT), eventsSince);
         // relay_poll is generic across every card kind (it doesn't know it was a relay_page call) —
         // withPagePayload is a no-op unless the verdict is 'submit', so this stays correct for
         // every other caller while still inlining the payload when resuming a relay_page wait.
         return okResult(await withPagePayload(cfg, formatResponse(res, args.id)));
+      }
+      case 'relay_reply': {
+        if (!args.id) return errResult('relay_reply: id is required');
+        const body = typeof args.body === 'string' ? args.body.trim() : '';
+        if (!body) return errResult('relay_reply: body is required');
+        const result = await appendAgentEvent(cfg, args.id, body);
+        return okResult({ status: 'sent', id: args.id, seq: result?.event?.seq ?? null });
       }
       default:
         return errResult(`unknown tool: ${name}`);

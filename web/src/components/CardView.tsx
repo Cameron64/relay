@@ -12,6 +12,7 @@ import { Actions } from './cards/Actions';
 import { ChoiceCard } from './cards/ChoiceCard';
 import { PromptReply } from './cards/PromptReply';
 import { PageFrame } from './cards/PageFrame';
+import { Thread } from './cards/Thread';
 import { ResolvedBanner } from './ResolvedBanner';
 import { replyRequested } from '../utils/focus';
 import type { Card } from '../types';
@@ -51,6 +52,10 @@ export function CardView({ card }: { card: Card }) {
   const isPage = card.kind === 'page' && !!card.page_html;
   const isResolved = card.status === 'responded' && !!card.response;
   const hasActions = !isResolved && !!card.buttons?.length;
+  // Card threads (Plan 04): threads are for approval/choice/prompt cards only — the kinds that
+  // solicit a response and can meaningfully carry a "clarify before deciding" exchange. View-only
+  // kinds (note/diagram/image/draft/page) never render a thread, per the plan's Non-goals.
+  const supportsThread = card.kind === 'approval' || card.kind === 'choice' || card.kind === 'prompt';
 
   return (
     <MCard
@@ -99,6 +104,8 @@ export function CardView({ card }: { card: Card }) {
       ) : null}
 
       {!isPage && card.mermaid ? <Mermaid code={card.mermaid} /> : null}
+
+      {supportsThread ? <Thread card={card} /> : null}
 
       {isChoice ? (
         <ChoiceCard card={card} />

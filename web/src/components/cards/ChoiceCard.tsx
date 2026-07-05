@@ -5,6 +5,7 @@ import { respond } from '../../api';
 import { useFeed } from '../../store/feed';
 import { Markdown } from './Markdown';
 import { Mermaid } from './Mermaid';
+import { AskQuestion } from './AskQuestion';
 import type { Card } from '../../types';
 
 // Rich multiple-choice card (kind: 'choice'). Each option is a selectable panel that can carry a
@@ -94,6 +95,7 @@ export function ChoiceCard({ card }: { card: Card }) {
           </Paper>
         );
       })}
+      {!chosen ? <AskQuestion cardId={card.id} /> : null}
     </Stack>
   );
 }

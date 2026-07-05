@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { Card, CardResponse, Dispatch } from '../types';
+import type { Card, CardEvent, CardResponse, Dispatch } from '../types';
 
 // Sort newest-first by created_at (ISO strings compare lexicographically for the same format).
 // Generic over Card|Dispatch — both shapes carry a plain `created_at` ISO string.
@@ -14,6 +14,11 @@ interface FeedState {
   // apart from `cards` rather than merged in because a dispatch and its eventual result CARD are
   // two distinct rows the server never conflates — Feed.tsx interleaves them for display only.
   dispatches: Dispatch[]; // newest-first
+  // Card threads (Plan 04): a card's card_events, KEYED BY CARD ID, populated lazily by Thread.tsx
+  // (a fetchCardEvents() call) rather than embedded on the Card object itself — Plan 00's gotcha
+  // that listCards()/getCard's feed payload must never carry the full thread just to show a badge.
+  // Absent key = "never loaded this card's thread"; Thread.tsx is what decides when to load it.
+  events: Record<string, CardEvent[]>;
   newestCursor: string | null;
   newestDispatchCursor: string | null;
   flashIds: Set<string>;
@@ -22,12 +27,23 @@ interface FeedState {
   applyResolved: (id: string, response: CardResponse) => void;
   remove: (id: string) => void;
   clearFlash: (id: string) => void;
+  // Full replace of a card's thread — the result of a fetchCardEvents() GET (Thread.tsx's initial
+  // hydration). Always sorted ascending by seq (the server already returns them that way).
+  setEvents: (cardId: string, events: CardEvent[]) => void;
+  // Merge one new event into a card's thread — used by both the composer's own post (so the
+  // sender sees their message immediately, without waiting for the SSE echo) and the SSE
+  // 'card-event' broadcast (so OTHER open tabs/devices see it live). De-duped by seq so the two
+  // paths landing for the same event is harmless. Initializes the slice to [] if it wasn't loaded
+  // yet — safe because the only way to append BEFORE a load is posting the card's first-ever
+  // message, so "previously unloaded" and "previously empty" are the same state in that case.
+  appendEvent: (cardId: string, event: CardEvent) => void;
   clear: () => void;
 }
 
 export const useFeed = create<FeedState>((set) => ({
   cards: [],
   dispatches: [],
+  events: {},
   newestCursor: null,
   newestDispatchCursor: null,
   flashIds: new Set<string>(),
@@ -88,5 +104,16 @@ export const useFeed = create<FeedState>((set) => ({
       return { flashIds };
     }),
 
-  clear: () => set({ cards: [], dispatches: [], newestCursor: null, newestDispatchCursor: null, flashIds: new Set<string>() }),
+  setEvents: (cardId, events) =>
+    set((s) => ({ events: { ...s.events, [cardId]: [...events].sort((a, b) => a.seq - b.seq) } })),
+
+  appendEvent: (cardId, event) =>
+    set((s) => {
+      const existing = s.events[cardId] ?? [];
+      if (existing.some((e) => e.seq === event.seq)) return {} as Partial<FeedState>; // de-dupe
+      const merged = [...existing, event].sort((a, b) => a.seq - b.seq);
+      return { events: { ...s.events, [cardId]: merged } };
+    }),
+
+  clear: () => set({ cards: [], dispatches: [], events: {}, newestCursor: null, newestDispatchCursor: null, flashIds: new Set<string>() }),
 }));

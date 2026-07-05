@@ -1,6 +1,10 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { useFeed } from './feed';
-import type { Card, Dispatch } from '../types';
+import type { Card, CardEvent, Dispatch } from '../types';
+
+function event(cardId: string, seq: number, extra: Partial<CardEvent> = {}): CardEvent {
+  return { card_id: cardId, seq, role: 'agent', type: 'message', body: 'm' + seq, at: 't' + seq, ...extra };
+}
 
 function card(id: string, created_at: string, extra: Partial<Card> = {}): Card {
   return { id, title: 't' + id, kind: 'note', status: 'pending', created_at, ...extra };
@@ -104,6 +108,49 @@ describe('feed store', () => {
       expect(useFeed.getState().cards).toHaveLength(0);
       expect(useFeed.getState().dispatches).toHaveLength(0);
       expect(useFeed.getState().newestDispatchCursor).toBeNull();
+    });
+  });
+
+  // relay-roadmap Plan 04 — card threads: events are a SEPARATE keyed slice (never embedded on
+  // the Card object), populated lazily by Thread.tsx and kept live via the SSE 'card-event'
+  // broadcast (see useSSE.ts's onCardEvent -> appendEvent wiring).
+  describe('events slice (Plan 04)', () => {
+    it('setEvents replaces a card thread, sorted ascending by seq', () => {
+      useFeed.getState().setEvents('c1', [event('c1', 2), event('c1', 1)]);
+      expect(useFeed.getState().events.c1.map((e) => e.seq)).toEqual([1, 2]);
+    });
+
+    it('appendEvent merges a new event into an existing thread', () => {
+      useFeed.getState().setEvents('c1', [event('c1', 1)]);
+      useFeed.getState().appendEvent('c1', event('c1', 2));
+      expect(useFeed.getState().events.c1.map((e) => e.seq)).toEqual([1, 2]);
+    });
+
+    it('appendEvent de-dupes by seq (the composer\'s own post + the SSE echo landing for the same event)', () => {
+      useFeed.getState().setEvents('c1', [event('c1', 1)]);
+      useFeed.getState().appendEvent('c1', event('c1', 2, { body: 'first' }));
+      useFeed.getState().appendEvent('c1', event('c1', 2, { body: 'duplicate echo' })); // same seq, ignored
+      expect(useFeed.getState().events.c1).toHaveLength(2);
+      expect(useFeed.getState().events.c1[1].body).toBe('first');
+    });
+
+    it('appendEvent initializes an unloaded card thread rather than dropping the message', () => {
+      expect(useFeed.getState().events.c2).toBeUndefined();
+      useFeed.getState().appendEvent('c2', event('c2', 1));
+      expect(useFeed.getState().events.c2.map((e) => e.seq)).toEqual([1]);
+    });
+
+    it('other cards\' threads are untouched', () => {
+      useFeed.getState().setEvents('c1', [event('c1', 1)]);
+      useFeed.getState().appendEvent('c2', event('c2', 1));
+      expect(useFeed.getState().events.c1).toHaveLength(1);
+      expect(useFeed.getState().events.c2).toHaveLength(1);
+    });
+
+    it('clear() resets the events slice too', () => {
+      useFeed.getState().setEvents('c1', [event('c1', 1)]);
+      useFeed.getState().clear();
+      expect(useFeed.getState().events).toEqual({});
     });
   });
 });

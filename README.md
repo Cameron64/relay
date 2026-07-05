@@ -118,15 +118,19 @@ relay ask   --title T [--body B|--body-stdin] [--placeholder P]
             # push carries a "Reply" button that opens a text box; --wait returns the typed answer
 relay draft --title T [--body B|--body-stdin] [--image PATH]... [--link "Label=url"]...
             [--push] [--no-open] [--high]              # rich WYSIWYG-editable message card
-relay poll  <cardId> [--wait=SECS]                     # re-poll an existing card's verdict
+relay poll  <cardId> [--wait=SECS] [--events-since=N]  # re-poll an existing card's verdict
+            # --events-since: also resolve early on a new human thread message (card threads)
+relay reply <cardId> --body B|--body-stdin             # reply into a card's thread, no verdict
 relay arm "<label>" | relay disarm                    # arm/clear the Stop-hook "done" ping
 relay afk   [on [--reason R] | off | status]           # away-from-keyboard flag (~/.relay/afk.json)
 ```
 
 `--wait` / `poll` / `choice` / `ask` always print **one JSON line on stdout** with an explicit
-`status` (`answered` · `pending` · `notfound` · `error` · `created`) — key off that, not the exit
-code. A free-text answer (`relay ask`) comes back as verdict `reply` with the text in `note` and a
-top-level `reply` field. Exit codes mirror it: **0**=approved or reply · **20**=changes_requested ·
+`status` (`answered` · `event` · `pending` · `notfound` · `error` · `created`) — key off that, not
+the exit code. A free-text answer (`relay ask`) comes back as verdict `reply` with the text in
+`note` and a top-level `reply` field. `status:"event"` (only with `--events-since`) means a human
+sent a thread message instead of a verdict — see [Card threads](#card-threads) below. Exit codes
+mirror it: **0**=approved or reply · **20**=changes_requested · **21**=event ·
 **1**=other/dismissed verdict · **3**=timeout · **4**=notfound (expired/dismissed) · **5**=error
 (· **2**=usage).
 `relay afk status` exit codes: **0**=at desk · **10**=AFK (the command itself never fails; the code
@@ -206,7 +210,8 @@ claude mcp add relay -- node "C:/Users/Cam Dowdle/source/repos/personal/relay/bi
 | `relay_page` | optional (`expectResponse`) | post an interactive HTML+JS page (charts, sims, explainers) rendered in a sandboxed iframe; with `expectResponse:true` the page can `postMessage` a structured answer back and the tool blocks for it |
 | `relay_ask` | yes (default 50s) | open-ended question → free-text reply |
 | `relay_choice` | yes (default 50s) | pick one of several options |
-| `relay_poll` | yes (default 50s) | resume waiting on a card that returned `pending` |
+| `relay_poll` | yes (default 50s) | resume waiting on a card that returned `pending` or `event`; `eventsSince` opts into card threads |
+| `relay_reply` | no | reply into a card's thread without resolving its verdict |
 
 Blocking tools poll for a bounded window (`waitSeconds`, ≤ 280) that stays under the MCP client's
 per-call timeout (`MCP_TIMEOUT`); if no answer lands they return `{"status":"pending","id":…}` and
@@ -235,6 +240,44 @@ waitSeconds }` blocks like `relay_ask`/`relay_choice` and returns
 `{ status:'answered', verdict:'submit', payload:{...}, id }`; `relay_poll` resumes the wait the same
 way and also inlines the payload. A ready-to-copy reference implementation (form fields + the two
 postMessage calls, done correctly) lives at `lib/page-templates/form-template.html`.
+
+## Card threads
+
+An approval/choice/prompt card doesn't have to end in one shot. Instead of answering, tap **Ask a
+question** (approval/choice) or **Send as question** (prompt) — that posts a message into the
+card's thread without resolving it, so the card stays pending. The waiting agent's next
+thread-aware poll sees it and can reply before you actually decide:
+
+```
+relay card --kind approval --title "Ship the migration?"     # create it, don't --wait
+relay poll <id> --wait=50 --events-since=0                   # verdict-or-thread-aware poll
+# stdout: {"status":"event","id":"<id>","events":[{"role":"user","body":"why this migration?",...}]}
+relay reply <id> --body "it fixes the N+1 on the dashboard"
+relay poll <id> --wait=50 --events-since=<seq from the reply>
+# ... you approve on your phone ...
+# stdout: {"status":"answered","verdict":"approved",...}
+```
+
+(`relay card/choice/ask --wait` themselves stay plain verdict-only polls, exactly as before this
+feature — thread awareness is opt-in via `relay poll --events-since`, so use `relay poll` for the
+resumable wait once you want it. The `relay_card`/`relay_ask`/`relay_choice` **MCP** tools, by
+contrast, surface thread events on their own blocking wait automatically — see below.)
+
+- **Server**: `GET /api/cards/:id/response` gains `&events_since=SEQ` — opt-in, resolves early on
+  EITHER the verdict landing or a new human (`role:'user'`) thread message; omit it and the route
+  behaves exactly as it did before this feature existed (every pre-existing CLI/MCP/hook caller).
+  An agent's own thread message pushes to your phone at high urgency (it's still blocked waiting);
+  your own messages never push back to yourself.
+- **MCP**: `relay_poll` takes `eventsSince`; a `status:"event"` result carries `events` + the
+  `sinceSeq` to resume from. `relay_reply({id, body})` answers into the thread without resolving
+  the card. `relay_card` / `relay_ask` / `relay_choice`'s blocking path surfaces `event` results
+  automatically instead of swallowing them as a plain timeout.
+- **CLI**: `relay poll <id> --events-since=N` / `relay reply <id> --body B`. `relay card/choice/ask
+  --wait` themselves stay verdict-only (no thread awareness) — resume with `relay poll
+  --events-since` to opt in.
+- The verdict itself is unchanged — a thread is a detour to *reach* the same one-shot
+  `respond`/`--wait` verdict every existing caller already understands, never a replacement for it.
+  No threads on view-only cards (note/diagram/image/draft/page).
 
 ## Claude Code hooks
 
@@ -307,7 +350,7 @@ API with no frontend.
 | POST | `/api/cards` | write | create a card (+ optional push) |
 | GET | `/api/cards` · `/api/cards/:id` | UI | feed / one card |
 | POST | `/api/cards/:id/respond` | UI | record a verdict |
-| GET | `/api/cards/:id/response?wait=N` | write | long-poll the verdict |
+| GET | `/api/cards/:id/response?wait=N&events_since=SEQ` | write | long-poll the verdict; `events_since` (opt-in) also resolves early on a new thread message — omit for the exact pre-Plan-04 behavior |
 | POST | `/api/cards/:id/events` | UI | append a thread event (role:'user') |
 | GET | `/api/cards/:id/events?since_seq=N&wait=S` | UI | list/long-poll events after seq N |
 | POST | `/api/cards/:id/agent-events` | write | append a thread event (role:'agent') |

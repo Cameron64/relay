@@ -5,6 +5,7 @@ import { respond } from '../../api';
 import { copyRich } from '../../utils/clipboard';
 import { markdownToSafeHtml } from '../../utils/markdown';
 import { useFeed } from '../../store/feed';
+import { AskQuestion } from './AskQuestion';
 import type { Card, CardButton } from '../../types';
 
 // Map the card button's `style` to a Mantine button variant/color. Mirrors the old class mapping:
@@ -94,15 +95,18 @@ export function Actions({ card }: { card: Card }) {
   }
 
   return (
-    <Group gap="xs" mt="sm" wrap="wrap">
-      {card.buttons!.map((b) => {
-        const v = variantFor(b);
-        return (
-          <Button key={b.id} variant={v.variant} color={v.color} onClick={() => onClick(b)} disabled={sending}>
-            {b.label}
-          </Button>
-        );
-      })}
-    </Group>
+    <Stack gap={0}>
+      <Group gap="xs" mt="sm" wrap="wrap">
+        {card.buttons!.map((b) => {
+          const v = variantFor(b);
+          return (
+            <Button key={b.id} variant={v.variant} color={v.color} onClick={() => onClick(b)} disabled={sending}>
+              {b.label}
+            </Button>
+          );
+        })}
+      </Group>
+      <AskQuestion cardId={card.id} />
+    </Stack>
   );
 }

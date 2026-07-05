@@ -179,6 +179,27 @@ describe('formatResponse', () => {
     expect(r.status).toBe('notfound');
     expect(r.id).toBe('id4');
   });
+
+  // relay-roadmap Plan 04 — card threads: a poll made with eventsSince can come back as
+  // status:'event' (a human message landed instead of a verdict) rather than being swallowed as
+  // a plain timeout.
+  describe('status "event" (Plan 04 card threads)', () => {
+    test('surfaces the events array and points the caller at relay_reply + resuming relay_poll', () => {
+      const events = [{ card_id: 'id5', seq: 3, role: 'user', type: 'message', body: 'why this migration?', at: 't' }];
+      const r = formatResponse({ status: 'event', events }, 'id5');
+      expect(r.status).toBe('event');
+      expect(r.id).toBe('id5');
+      expect(r.events).toEqual(events);
+      expect(r.sinceSeq).toBe(3);
+      expect(r.message).toContain('relay_reply');
+      expect(r.message).toContain('relay_poll');
+    });
+
+    test('sinceSeq falls back to 0 when events is empty', () => {
+      const r = formatResponse({ status: 'event', events: [] }, 'id6');
+      expect(r.sinceSeq).toBe(0);
+    });
+  });
 });
 
 describe('withPagePayload', () => {
@@ -232,9 +253,9 @@ describe('withPagePayload', () => {
 });
 
 describe('TOOL_DEFS', () => {
-  test('exposes the six relay tools, each with a description and input schema', () => {
+  test('exposes the seven relay tools, each with a description and input schema', () => {
     const names = TOOL_DEFS.map((t: any) => t.name).sort();
-    expect(names).toEqual(['relay_ask', 'relay_card', 'relay_choice', 'relay_notify', 'relay_page', 'relay_poll']);
+    expect(names).toEqual(['relay_ask', 'relay_card', 'relay_choice', 'relay_notify', 'relay_page', 'relay_poll', 'relay_reply']);
     for (const t of TOOL_DEFS) {
       expect(typeof t.description).toBe('string');
       expect(t.description.length).toBeGreaterThan(20);
@@ -248,6 +269,14 @@ describe('TOOL_DEFS', () => {
     expect(byName.relay_ask.inputSchema.required).toContain('title');
     expect(byName.relay_poll.inputSchema.required).toContain('id');
     expect(byName.relay_page.inputSchema.required).toEqual(['title', 'html']);
+  });
+
+  // relay-roadmap Plan 04 — card threads.
+  test('relay_poll exposes eventsSince; relay_reply requires id + body', () => {
+    const byName = Object.fromEntries(TOOL_DEFS.map((t: any) => [t.name, t]));
+    expect(byName.relay_poll.inputSchema.properties.eventsSince.type).toBe('number');
+    expect(byName.relay_reply.inputSchema.required).toEqual(['id', 'body']);
+    expect(byName.relay_reply.inputSchema.properties.body.type).toBe('string');
   });
 
   test('relay_page exposes expectResponse + waitSeconds and documents the submit protocol', () => {

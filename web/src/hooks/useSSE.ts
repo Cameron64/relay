@@ -54,12 +54,24 @@ export function useSSE(enabled: boolean): void {
         /* ignore malformed */
       }
     };
+    // Card threads (Plan 04): routes-cards.ts broadcasts { cardId, event } on every card_events
+    // append (agent OR user side). appendEvent is a no-op-safe merge — de-dupes if this same
+    // event already landed via the composer's own optimistic post (see Thread.tsx / Actions.tsx).
+    const onCardEvent = (e: MessageEvent) => {
+      try {
+        const { cardId, event } = JSON.parse(e.data);
+        if (cardId && event) useFeed.getState().appendEvent(cardId, event);
+      } catch {
+        /* ignore malformed */
+      }
+    };
 
     es.addEventListener('open', onOpen);
     es.addEventListener('card-created', onCreated);
     es.addEventListener('card-updated', onUpdated);
     es.addEventListener('card-removed', onRemoved);
     es.addEventListener('dispatch-updated', onDispatchUpdated);
+    es.addEventListener('card-event', onCardEvent);
 
     return () => {
       es.close();
