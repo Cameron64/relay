@@ -121,6 +121,12 @@ appRoutes.post('/cards', requireWrite, async (c) => {
     // "open the app focused on the reply box" (not a background respond), and its deep link carries
     // &reply=1 so the composer auto-focuses on arrival.
     const isPrompt = card.kind === 'prompt';
+    // A page created with expects_response:true (Plan 05's postMessage submit bridge) has no
+    // buttons/options of its own — the "respond" affordance lives INSIDE the sandboxed iframe
+    // (a form, sliders, whatever the agent built) — so it can't surface action buttons on the
+    // notification the way approval/choice/prompt do. It's still time-sensitive, so it only
+    // affects urgency/pushBody below, never the `actions` array.
+    const isExpectingPage = card.kind === 'page' && card.expects_response;
     const respondActions = card.buttons
       .filter((b) => b.behavior === 'respond')
       .map((b) => ({ action: b.id, title: b.label }));
@@ -129,13 +135,14 @@ appRoutes.post('/cards', requireWrite, async (c) => {
       ? [{ action: '__reply', title: 'Reply' }]
       : (respondActions.length ? respondActions : optionActions).slice(0, 2);
     const high = card.priority === 'high';
-    // Cards that solicit a response — approval / prompt / choice, or any card carrying respond
-    // buttons or options — are inherently time-sensitive (the sender is usually blocking on the
-    // answer). Send those at high Web Push urgency so FCM wakes the device instead of deferring
-    // the notification to the next Doze / battery-optimization window. requireInteraction (the
-    // sticky, un-dismissable notification) stays gated on explicit --high, so making interactive
-    // cards urgent doesn't also make every approval notification impossible to swipe away.
-    const solicitsResponse = isPrompt || respondActions.length > 0 || optionActions.length > 0;
+    // Cards that solicit a response — approval / prompt / choice, an expecting page, or any card
+    // carrying respond buttons or options — are inherently time-sensitive (the sender is usually
+    // blocking on the answer). Send those at high Web Push urgency so FCM wakes the device instead
+    // of deferring the notification to the next Doze / battery-optimization window.
+    // requireInteraction (the sticky, un-dismissable notification) stays gated on explicit --high,
+    // so making interactive cards urgent doesn't also make every approval notification impossible
+    // to swipe away.
+    const solicitsResponse = isPrompt || respondActions.length > 0 || optionActions.length > 0 || isExpectingPage;
     const urgent = high || solicitsResponse;
     const cardUrl = '/?card=' + card.id + (isPrompt ? '&reply=1' : '');
     const pushBody =
@@ -145,7 +152,9 @@ appRoutes.post('/cards', requireWrite, async (c) => {
           ? 'Tap Reply to answer'
           : card.kind === 'approval'
             ? 'Tap to review & respond'
-            : 'Tap to view';
+            : isExpectingPage
+              ? 'Tap to answer'
+              : 'Tap to view';
     try {
       const result = await sendPushToAll({
         title: card.title,

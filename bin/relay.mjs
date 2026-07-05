@@ -468,10 +468,16 @@ export function buildChoicePayload({ title, body = null, options = [], priority 
 
 // Pure: assemble a 'page' card payload — a full agent-authored HTML+JS document rendered in a
 // sandboxed iframe on the Relay web app. page_html is a TOP-LEVEL key (the server's validateCardInput
-// reads b.page_html and createCard INSERTs it). No buttons/options: a page is view-only, not
-// responded to. Throws without a title or pageHtml. There is no CLI `relay page` command — this
-// builder exists so the MCP server (relay_page) shares the same tested payload shape.
-export function buildPagePayload({ title, pageHtml, copyText = null, priority = 'normal', push = true, expiresAt = null, source = {} }) {
+// reads b.page_html and createCard INSERTs it). No buttons/options: a page's respond affordance (if
+// any) lives INSIDE the sandboxed document, via the postMessage submit bridge (relay-roadmap Plan
+// 05) — see expectsResponse below. Throws without a title or pageHtml. There is no CLI `relay page`
+// command — this builder exists so the MCP server (relay_page) shares the same tested payload shape.
+//
+// expectsResponse: false (default) is a plain view-only page — unchanged from before Plan 05.
+// true marks the card as response-soliciting: no default expiry while pending (cards-store.ts
+// treats it like an approval) and the push is sent at high urgency (routes-cards.ts). It does NOT
+// add any button/action — the page itself must call postMessage({__relay:'submit', payload}).
+export function buildPagePayload({ title, pageHtml, copyText = null, priority = 'normal', push = true, expiresAt = null, expectsResponse = false, source = {} }) {
   if (!title) throw new Error('relay page: title is required');
   if (!pageHtml) throw new Error('relay page: html is required');
   return {
@@ -482,6 +488,7 @@ export function buildPagePayload({ title, pageHtml, copyText = null, priority = 
     buttons: [],
     priority,
     push,
+    expects_response: !!expectsResponse,
     source,
     ...(expiresAt ? { expires_at: expiresAt } : {}),
   };

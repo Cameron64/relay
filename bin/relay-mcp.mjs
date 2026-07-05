@@ -23,7 +23,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { pathToFileURL } from 'node:url';
 import { loadConfig, projectFromCwd, sessionIdFromEnv } from '../lib/relay-lib.mjs';
-import { createCard, pollResponse, sendNotify } from '../lib/relay-client.mjs';
+import { createCard, pollResponse, sendNotify, getCardEvents } from '../lib/relay-client.mjs';
 import { buildCardPayload, buildChoicePayload, buildAskPayload, buildPagePayload, parseTtl, VERDICT_ALIAS } from './relay.mjs';
 
 const DEFAULT_WAIT = 50; // seconds; one bounded server long-poll, safely under a typical MCP timeout
@@ -134,6 +134,7 @@ export function pageArgsToPayload(args, ctx = {}) {
     priority: args.high ? 'high' : 'normal',
     push: true,
     expiresAt: ttlToExpiresAt(args.ttl),
+    expectsResponse: !!args.expectResponse,
     source: { cwd: ctx.cwd ?? null, host: ctx.host ?? null, sessionId: ctx.sessionId ?? null },
   });
 }
@@ -227,7 +228,13 @@ export const TOOL_DEFS = [
   },
   {
     name: 'relay_page',
-    description: `Render an interactive HTML+JS PAGE on Relay (phone + desktop) — for explaining something in depth or modelling/visualising it quickly: charts, simulations, diagrams, interactive widgets, rich styled explainers. The "html" you pass is a COMPLETE HTML document shown in a SANDBOXED iframe. Returns { id, url } immediately (a page is view-only, never blocks).
+    description: `Render an interactive HTML+JS PAGE on Relay (phone + desktop) — for explaining something in depth or modelling/visualising it quickly: charts, simulations, diagrams, interactive widgets, rich styled explainers. The "html" you pass is a COMPLETE HTML document shown in a SANDBOXED iframe. By default a page is VIEW-ONLY and returns { id, url } immediately, never blocking.
+
+SUBMIT PROTOCOL (optional — turns the page into a blocking question with a structured answer): set expectResponse:true and design the page so the user's input ends in an explicit submit action (a button — never auto-submit on every change). From inside the page:
+  window.parent.postMessage({ __relay: 'submit', payload: { ...any JSON, <=64KB... } }, '*');
+Call this ONCE; the parent only accepts the FIRST submit for a given card and silently ignores the rest — after calling it, disable your submit control and show a "sent" state (do not rely on the parent to tell you it was ignored). Optionally, right after the page loads, announce that it wants input (shows a "waiting for your input" banner in the app instead of plain page chrome):
+  window.parent.postMessage({ __relay: 'ready', expectsResponse: true }, '*');
+'*' as the target origin is correct here — the sandboxed iframe has an opaque origin and cannot name the parent's; the parent validates the message by IDENTITY (its own iframe), not by origin. With expectResponse:true this tool blocks up to waitSeconds (default 50, same as relay_ask/relay_choice) and returns { status:'answered', verdict:'submit', payload:{...}, id } once the user submits; on 'pending', call relay_poll with the id to keep waiting — it also returns the payload once answered. Without expectResponse (the default), none of this applies — the page is exactly as view-only as before.
 
 WHEN TO USE: prefer relay_page over relay_card's markdown when a static note won't do — you want a chart, an animation, an interactive control, a simulation, math/LaTeX, or a multi-section styled explainer.
 
@@ -266,6 +273,14 @@ Richer starting points (chart / dataviz / simulation / 3d / explainer) live in t
         copy: { type: 'string', description: 'Optional text offered behind a one-tap "Copy to clipboard" button.' },
         high: { type: 'boolean', description: 'High-priority push (urgent + sticky notification).' },
         ttl: { type: 'string', description: 'Auto-clear after a duration ("30m","2h","1d") or "keep" to never expire. Default ~24h.' },
+        expectResponse: {
+          type: 'boolean',
+          description: 'Set true when the page asks a question (see the SUBMIT PROTOCOL above) — blocks for the postMessage submit instead of returning immediately. No default expiry while pending.',
+        },
+        waitSeconds: {
+          type: 'number',
+          description: 'Only used with expectResponse:true. Block up to N seconds (<=280, default 50) for the submit. Omit / 0 with expectResponse still creates the card without blocking.',
+        },
       },
       additionalProperties: false,
     },
@@ -342,6 +357,25 @@ async function settle(cfg, created, waitSeconds, def) {
   return okResult(formatResponse(res, created.id));
 }
 
+// A page-submit bridge (relay-roadmap Plan 05) resolves the verdict to a bare 'submit' — the
+// structured answer itself lives in a card_events 'payload' row, never in `response` (master doc
+// §4: that column stays a bare verdict, forever). Once formatResponse reports 'answered' with
+// verdict 'submit', fetch the card's events and inline the payload so the caller doesn't need a
+// second round-trip. Best-effort: any failure to fetch/parse leaves `payload: null` rather than
+// failing the whole (already-answered) result — the verdict is the part that matters most.
+export async function withPagePayload(cfg, formatted) {
+  if (formatted.status !== 'answered' || formatted.verdict !== 'submit') return formatted;
+  let payload = null;
+  try {
+    const events = await getCardEvents(cfg, formatted.id);
+    const last = [...events].reverse().find((e) => e.type === 'payload');
+    if (last) payload = JSON.parse(last.body);
+  } catch {
+    payload = null;
+  }
+  return { ...formatted, payload };
+}
+
 export async function handleCall(name, rawArgs) {
   const args = rawArgs || {};
   const cfg = loadConfig();
@@ -371,9 +405,15 @@ export async function handleCall(name, rawArgs) {
         return settle(cfg, created, args.waitSeconds, 0); // fire-and-return unless waitSeconds is given
       }
       case 'relay_page': {
-        // A page is view-only — return its id/url immediately, never block for a response.
         const created = await createCard(cfg, pageArgsToPayload(args, ctx));
-        return okResult({ status: 'created', id: created.id, url: created.url });
+        // Default (no expectResponse): a page is view-only — return its id/url immediately, never
+        // block. With expectResponse:true, reuse relay_card/relay_ask's exact bounded-poll path,
+        // then inline the page's structured payload alongside the bare 'submit' verdict.
+        if (!args.expectResponse) return okResult({ status: 'created', id: created.id, url: created.url });
+        const wait = resolveWait(args.waitSeconds, DEFAULT_WAIT);
+        if (wait === 0) return okResult({ status: 'created', id: created.id, url: created.url });
+        const res = await pollResponse(cfg, created.id, wait);
+        return okResult(await withPagePayload(cfg, formatResponse(res, created.id)));
       }
       case 'relay_ask': {
         const created = await createCard(cfg, askArgsToPayload(args, ctx));
@@ -386,7 +426,10 @@ export async function handleCall(name, rawArgs) {
       case 'relay_poll': {
         if (!args.id) return errResult('relay_poll: id is required');
         const res = await pollResponse(cfg, args.id, resolveWait(args.waitSeconds, DEFAULT_WAIT));
-        return okResult(formatResponse(res, args.id));
+        // relay_poll is generic across every card kind (it doesn't know it was a relay_page call) —
+        // withPagePayload is a no-op unless the verdict is 'submit', so this stays correct for
+        // every other caller while still inlining the payload when resuming a relay_page wait.
+        return okResult(await withPagePayload(cfg, formatResponse(res, args.id)));
       }
       default:
         return errResult(`unknown tool: ${name}`);

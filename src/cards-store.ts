@@ -52,6 +52,12 @@ export type Card = {
   copy_text: string | null;
   mermaid: string | null;
   page_html: string | null;
+  // Plan 05 (page-submit bridge): when true, this card is treated like an approval for expiry
+  // purposes (no default TTL while pending — a question shouldn't vanish before it's answered)
+  // and its push is flagged response-soliciting (routes-cards.ts). Set at create time only; the
+  // PWA's runtime 'ready'/expectsResponse handshake is a SEPARATE, purely client-side signal for
+  // the "waiting for your input" banner and does not write back to this column.
+  expects_response: boolean;
   source: Record<string, unknown> | null;
   status: 'pending' | 'responded' | 'dismissed';
   response: CardResponse | null;
@@ -105,6 +111,9 @@ export type CardInput = {
   copy_text: string | null;
   mermaid: string | null;
   page_html: string | null;
+  // Optional; defaults to false when omitted (existing callers/tests that build a CardInput
+  // literal without this field are unaffected — see createCard's `?? false`).
+  expects_response?: boolean;
   source: Record<string, unknown> | null;
   priority: 'normal' | 'high';
   expires_at: string | null;
@@ -138,8 +147,12 @@ const CARD_TTL_HOURS = Number(process.env.CARD_TTL_HOURS ?? 24);
 const CARD_ANSWERED_TTL_HOURS = Number(process.env.CARD_ANSWERED_TTL_HOURS ?? 6);
 const NO_DEFAULT_EXPIRY_KINDS = new Set(['approval', 'choice', 'prompt']);
 
-function defaultExpiryFor(kind: string, createdAtIso: string): string | null {
-  if (NO_DEFAULT_EXPIRY_KINDS.has(kind)) return null;
+// expectsResponse (Plan 05) is the same "no default expiry while pending" treatment as the kinds
+// above, applied per-card rather than per-kind — a plain `page` still gets the 24h TTL bucket, but
+// a page created with expects_response:true (a question, not a view-only viz) waits for its answer
+// exactly like an approval/choice/prompt.
+function defaultExpiryFor(kind: string, createdAtIso: string, expectsResponse = false): string | null {
+  if (NO_DEFAULT_EXPIRY_KINDS.has(kind) || expectsResponse) return null;
   if (!(CARD_TTL_HOURS > 0)) return null;
   return new Date(Date.parse(createdAtIso) + CARD_TTL_HOURS * 3_600_000).toISOString();
 }
@@ -166,6 +179,7 @@ export function ensureCardsSchema(): void {
         copy_text    TEXT,
         mermaid      TEXT,
         page_html    TEXT,
+        expects_response INTEGER NOT NULL DEFAULT 0,
         source       TEXT,
         status       TEXT NOT NULL DEFAULT 'pending',
         response     TEXT,
@@ -204,6 +218,12 @@ export function ensureCardsSchema(): void {
     // existing rows backfill to NULL — safe on the live prod volume (no DEFAULT needed).
     if (!cols.some((c) => c.name === 'page_html')) {
       db.exec('ALTER TABLE cards ADD COLUMN page_html TEXT');
+    }
+    // Migration: `expects_response` (Plan 05's page-submit bridge) was added after the table
+    // shipped. NOT NULL with a DEFAULT backfills existing rows to 0 (unaffected — expiry/push
+    // behavior is only conditioned on this column being explicitly true).
+    if (!cols.some((c) => c.name === 'expects_response')) {
+      db.exec('ALTER TABLE cards ADD COLUMN expects_response INTEGER NOT NULL DEFAULT 0');
     }
     _ready = true;
   } catch (err) {
@@ -320,9 +340,13 @@ export function validateCardInput(body: unknown): Ok<CardInput> | Err {
   }
   const source = b.source && typeof b.source === 'object' ? (b.source as Record<string, unknown>) : null;
   const expires_at = typeof b.expires_at === 'string' ? b.expires_at : null;
+  // expects_response: a plain boolean flag (Plan 05). Not restricted to kind:'page' — the effect
+  // (no default expiry while pending + response-soliciting push) is harmless on any kind, and
+  // scoping it here would just be one more branch to keep in sync with VALID_KINDS.
+  const expects_response = b.expects_response === true;
   return {
     ok: true,
-    value: { kind, title, body: bodyText, buttons: bv.value, options: ov.value, copy_text, mermaid, page_html, source, priority, expires_at },
+    value: { kind, title, body: bodyText, buttons: bv.value, options: ov.value, copy_text, mermaid, page_html, expects_response, source, priority, expires_at },
   };
 }
 
@@ -358,6 +382,7 @@ function hydrate(row: any): Card {
     copy_text: row.copy_text,
     mermaid: row.mermaid,
     page_html: row.page_html ?? null,
+    expects_response: !!row.expects_response,
     source: safeJSON<Record<string, unknown> | null>(row.source, null),
     status: row.status,
     response: safeJSON<CardResponse | null>(row.response, null),
@@ -373,9 +398,10 @@ export function createCard(value: CardInput, assets: { mime: string; bytes: Uint
   const id = genId();
   const now = new Date().toISOString();
   const tx = db.transaction(() => {
+    const expectsResponse = value.expects_response ?? false;
     db.query(
-      `INSERT INTO cards (id, created_at, kind, title, body, buttons, options, copy_text, mermaid, page_html, source, status, priority, expires_at, push_sent)
-       VALUES ($id, $created, $kind, $title, $body, $buttons, $options, $copy, $mermaid, $page_html, $source, 'pending', $priority, $expires, 0)`,
+      `INSERT INTO cards (id, created_at, kind, title, body, buttons, options, copy_text, mermaid, page_html, expects_response, source, status, priority, expires_at, push_sent)
+       VALUES ($id, $created, $kind, $title, $body, $buttons, $options, $copy, $mermaid, $page_html, $expects_response, $source, 'pending', $priority, $expires, 0)`,
     ).run({
       $id: id,
       $created: now,
@@ -387,9 +413,10 @@ export function createCard(value: CardInput, assets: { mime: string; bytes: Uint
       $copy: value.copy_text ?? null,
       $mermaid: value.mermaid ?? null,
       $page_html: value.page_html ?? null,
+      $expects_response: expectsResponse ? 1 : 0,
       $source: value.source ? JSON.stringify(value.source) : null,
       $priority: value.priority || 'normal',
-      $expires: value.expires_at ?? defaultExpiryFor(value.kind, now),
+      $expires: value.expires_at ?? defaultExpiryFor(value.kind, now, expectsResponse),
     });
     for (const a of assets) {
       db.query('INSERT INTO card_assets (id, card_id, mime, bytes, created_at) VALUES ($id, $cid, $mime, $bytes, $created)').run({

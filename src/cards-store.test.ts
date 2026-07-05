@@ -213,6 +213,52 @@ describe('page cards (kind:page)', () => {
   });
 });
 
+describe('page-submit bridge (expects_response — Plan 05)', () => {
+  test('validateCardInput reads expects_response as a plain boolean, defaulting false', () => {
+    const plain = validateCardInput({ kind: 'page', title: 'Viz', page_html: '<p>x</p>' });
+    expect(plain.ok).toBe(true);
+    if (plain.ok) expect(plain.value.expects_response).toBe(false);
+    const asking = validateCardInput({ kind: 'page', title: 'Q', page_html: '<p>x</p>', expects_response: true });
+    expect(asking.ok).toBe(true);
+    if (asking.ok) expect(asking.value.expects_response).toBe(true);
+  });
+
+  test('a page with expects_response:true gets no default expiry, like an approval', () => {
+    const asking = createCard(input({ kind: 'page', page_html: '<p>x</p>', expects_response: true }));
+    expect(asking.expires_at).toBeNull();
+  });
+
+  test('a plain page (expects_response omitted/false) keeps the normal 24h-bucket default expiry', () => {
+    const plain = createCard(input({ kind: 'page', page_html: '<p>x</p>' }));
+    expect(plain.expires_at).not.toBeNull();
+    expect(plain.expects_response).toBe(false);
+  });
+
+  test('createCard round-trips expects_response through getCard', () => {
+    const card = createCard(input({ kind: 'page', page_html: '<p>x</p>', expects_response: true }));
+    expect(getCard(card.id)?.expects_response).toBe(true);
+  });
+
+  test('an explicit expires_at still wins over expects_response (caller opt-out)', () => {
+    const future = new Date(Date.now() + 3_600_000).toISOString();
+    const card = createCard(input({ kind: 'page', page_html: '<p>x</p>', expects_response: true, expires_at: future }));
+    expect(card.expires_at).toBe(future);
+  });
+
+  test('respondCard passthrough: a page-submit "submit" action records verdict "submit"', () => {
+    // Pages carry no buttons (view-only), so 'submit' hits the same unknown-action passthrough
+    // used by choice options — no VALID_VERDICTS change needed (master doc §4 / plan's Design
+    // section: that list only constrains *button-declared* verdicts).
+    const card = createCard(input({ kind: 'page', page_html: '<p>x</p>', expects_response: true }));
+    const r = respondCard(card.id, { action: 'submit' });
+    expect(r.status).toBe('responded');
+    if (r.status === 'responded') {
+      expect(r.response.verdict).toBe('submit');
+      expect(r.response.action).toBe('submit');
+    }
+  });
+});
+
 describe('respondCard — first-response-wins', () => {
   test('records verdict from the matching button, then 409s the second time', () => {
     const card = createCard({

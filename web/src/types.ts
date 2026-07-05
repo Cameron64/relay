@@ -81,6 +81,10 @@ export interface Card {
   mermaid?: string | null;
   copy_text?: string | null;
   page_html?: string | null; // kind:'page' — full HTML+JS doc rendered in a sandboxed iframe
+  // Plan 05 (page-submit bridge): set at create time when a page card asks a question rather
+  // than just displaying one — see PageFrame.tsx's postMessage handshake and cards-store.ts's
+  // matching field. Absent/false ⇒ a plain view-only page, unchanged from before this plan.
+  expects_response?: boolean;
   status: 'pending' | 'responded' | 'dismissed';
   response?: CardResponse | null;
   created_at: string;

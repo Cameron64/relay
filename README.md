@@ -203,7 +203,7 @@ claude mcp add relay -- node "C:/Users/Cam Dowdle/source/repos/personal/relay/bi
 |---|---|---|
 | `relay_notify` | no | fire-and-forget push |
 | `relay_card` | optional (`waitSeconds`) | post a note / approval / diagram card; block for a verdict |
-| `relay_page` | no | post an interactive HTML+JS page (charts, sims, explainers) rendered in a sandboxed iframe |
+| `relay_page` | optional (`expectResponse`) | post an interactive HTML+JS page (charts, sims, explainers) rendered in a sandboxed iframe; with `expectResponse:true` the page can `postMessage` a structured answer back and the tool blocks for it |
 | `relay_ask` | yes (default 50s) | open-ended question → free-text reply |
 | `relay_choice` | yes (default 50s) | pick one of several options |
 | `relay_poll` | yes (default 50s) | resume waiting on a card that returned `pending` |
@@ -213,6 +213,28 @@ per-call timeout (`MCP_TIMEOUT`); if no answer lands they return `{"status":"pen
 the agent calls `relay_poll` with that id — the same bounded-poll / re-poll pattern the CLI uses.
 Each result is one JSON object in the tool's text content. Built on `lib/relay-client.mjs` (a shared,
 side-effect-free HTTP client) plus the CLI's payload builders, so tool output matches the CLI's.
+
+### `relay_page` — pages can ask back (the submit bridge)
+
+`relay_page` is view-only by default. Pass `expectResponse: true` and the page can turn itself into
+a blocking question with a structured, typed answer — sliders, forms, ranked choices, whatever
+custom UI the agent invents. From inside the page:
+
+```js
+// Submit once; the parent only accepts the FIRST call and silently ignores the rest.
+window.parent.postMessage({ __relay: 'submit', payload: { /* any JSON, <= 64KB */ } }, '*');
+// Optional, right after load — swaps the app's plain page chrome for a "waiting for your input" banner:
+window.parent.postMessage({ __relay: 'ready', expectsResponse: true }, '*');
+```
+
+`'*'` as the target origin is correct: the sandboxed iframe has an opaque origin and can't name the
+parent's. The **parent** (`PageFrame.tsx`) validates the message by the sender's window identity
+(`event.source === <our iframe>.contentWindow`), never by origin — origin alone would accept a
+message from any other sandboxed frame in the same tab. `relay_page { expectResponse: true,
+waitSeconds }` blocks like `relay_ask`/`relay_choice` and returns
+`{ status:'answered', verdict:'submit', payload:{...}, id }`; `relay_poll` resumes the wait the same
+way and also inlines the payload. A ready-to-copy reference implementation (form fields + the two
+postMessage calls, done correctly) lives at `lib/page-templates/form-template.html`.
 
 ## Claude Code hooks
 

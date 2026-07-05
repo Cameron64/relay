@@ -1,4 +1,4 @@
-import type { Card, CardResponse, Dispatch, DispatchTarget, NotifyLogEntry, SessionSummary } from './types';
+import type { Card, CardEvent, CardResponse, Dispatch, DispatchTarget, NotifyLogEntry, SessionSummary } from './types';
 
 // All UI-side calls carry the relay_session httpOnly cookie (set at /api/unlock).
 export function api(path: string, opts: RequestInit = {}): Promise<Response> {
@@ -112,6 +112,35 @@ export async function respond(cardId: string, action: string, note: string | nul
   if (!res.ok) return { status: 'error' };
   const d = await res.json().catch(() => ({}));
   return { status: 'ok', response: d.response };
+}
+
+// Append a card_events row from the UI side (role:'user', fixed by the route — never sent here).
+// Used by PageFrame's postMessage bridge (Plan 05) to stash a page-submit payload BEFORE calling
+// respond(), so the payload's permanent home (the event row) exists before the verdict resolves —
+// see the ordering note in cards-store.ts / master doc §4 (the frozen `response` never carries
+// JSON, only a bare verdict).
+export type PostEventResult =
+  | { status: 'ok'; event: CardEvent }
+  | { status: 'notfound' }
+  | { status: 'conflict' }
+  | { status: 'error' };
+
+export async function postCardEvent(cardId: string, type: 'message' | 'payload', body: string): Promise<PostEventResult> {
+  let res: Response;
+  try {
+    res = await api(`/api/cards/${cardId}/events`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ type, body }),
+    });
+  } catch {
+    return { status: 'error' };
+  }
+  if (res.status === 404) return { status: 'notfound' };
+  if (res.status === 409) return { status: 'conflict' };
+  if (!res.ok) return { status: 'error' };
+  const d = await res.json().catch(() => ({}));
+  return { status: 'ok', event: d.event };
 }
 
 // Clear a card from the feed. Fire-and-forget from the UI's perspective: the optimistic local

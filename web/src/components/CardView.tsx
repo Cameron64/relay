@@ -89,7 +89,7 @@ export function CardView({ card }: { card: Card }) {
       {!isEditableDraft && card.assets?.length ? <ImageAssets card={card} /> : null}
 
       {isPage ? (
-        <PageFrame pageHtml={card.page_html} title={card.title} />
+        <PageFrame card={card} />
       ) : isEditableDraft ? (
         <EditableDraft card={card} autoFocus={autoFocusEditor} />
       ) : card.kind === 'draft' && card.body ? (

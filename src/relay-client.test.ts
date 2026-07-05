@@ -4,7 +4,7 @@
 // 503-is-soft handling.
 import { test, expect, describe, afterEach } from 'bun:test';
 // @ts-ignore — zero-dep .mjs client has no .d.ts
-import { createCard, pollResponse, sendNotify } from '../lib/relay-client.mjs';
+import { createCard, pollResponse, sendNotify, getCardEvents } from '../lib/relay-client.mjs';
 
 const cfg = { url: 'https://relay.test', writeToken: 'tok' };
 const realFetch = globalThis.fetch;
@@ -90,6 +90,26 @@ describe('pollResponse', () => {
     queueFetch([new Error('ECONNRESET'), res({ json: { status: 'responded', response: { verdict: 'approved' } } })]);
     const r = await pollResponse(cfg, 'id1', 50);
     expect(r.status).toBe('responded');
+  });
+});
+
+describe('getCardEvents', () => {
+  test('GETs /api/cards/:id/agent-events with the write token and returns the events array', async () => {
+    const calls = queueFetch([res({ json: { events: [{ card_id: 'id1', seq: 1, role: 'user', type: 'payload', body: '{}', at: 't' }] } })]);
+    const events = await getCardEvents(cfg, 'id1');
+    expect(events).toHaveLength(1);
+    expect(calls[0].url).toBe('https://relay.test/api/cards/id1/agent-events');
+    expect(calls[0].opts.headers['x-write-token']).toBe('tok');
+  });
+
+  test('returns [] when the response has no events field', async () => {
+    queueFetch([res({ json: {} })]);
+    expect(await getCardEvents(cfg, 'id1')).toEqual([]);
+  });
+
+  test('throws "HTTP <status>" on a non-OK response', async () => {
+    queueFetch([res({ status: 404, text: 'not found' })]);
+    await expect(getCardEvents(cfg, 'gone')).rejects.toThrow(/HTTP 404/);
   });
 });
 
