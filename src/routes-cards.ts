@@ -352,11 +352,25 @@ appRoutes.get('/cards/:id/response', requireWrite, async (c) => {
   if (alreadyNew) return c.json({ status: 'event', events: cards.listCardEvents(id, { sinceSeq }) });
   if (waitMs <= 0) return c.json({ status: 'pending' });
 
-  const woke = await waitForResponseOrEvent(id, waitMs);
-  if (woke.kind === 'responded') return c.json({ status: 'responded', response: woke.resp, events: cards.listCardEvents(id) });
-  if (woke.kind === 'event') {
-    const events = cards.listCardEvents(id, { sinceSeq });
-    if (events.some((e) => e.role === 'user')) return c.json({ status: 'event', events });
+  // event-waiters.ts's waitForEvents wakes on ANY card_event append (agent OR user role) — it has
+  // no concept of role, by design (routes-cards.ts's plain GET .../events long-poll wants exactly
+  // that "wake on anything new" behavior). So a role:'agent' append elsewhere (e.g. a concurrent
+  // relay_reply for the same card) wins the race here too, even though it isn't "the human asked
+  // something". Re-loop on the REMAINING time budget instead of surfacing that as 'pending' — a
+  // caller's `wait=N` is a promise to hold the connection open for N seconds; only a real verdict
+  // or a role:'user' event (or the deadline itself) may end it early.
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+    const woke = await waitForResponseOrEvent(id, remaining);
+    if (woke.kind === 'responded') return c.json({ status: 'responded', response: woke.resp, events: cards.listCardEvents(id) });
+    if (woke.kind === 'event') {
+      const events = cards.listCardEvents(id, { sinceSeq });
+      if (events.some((e) => e.role === 'user')) return c.json({ status: 'event', events });
+      continue; // agent-only event landed elsewhere — not a wake condition, keep waiting
+    }
+    break; // 'pending': both sides of the race timed out with nothing new
   }
   return c.json({ status: 'pending' });
 });

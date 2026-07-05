@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
 import { useFeed } from '../store/feed';
-import { fetchCards, fetchDispatches } from '../api';
+import { fetchCards, fetchDispatches, fetchCardEvents } from '../api';
 
 // Live feed over EventSource. Connects when `enabled` (i.e. unlocked + showing the feed). On a
 // reconnect AFTER the first open, it backfills any cards AND dispatches missed while disconnected
@@ -20,6 +20,19 @@ export function useSSE(enabled: boolean): void {
         const dispatchCursor = useFeed.getState().newestDispatchCursor;
         const dres = await fetchDispatches(dispatchCursor);
         if (dres.status === 'ok') dres.dispatches.forEach((d) => useFeed.getState().upsertDispatch(d));
+        // Card threads (Plan 04): the cursor backfills above only cover `card-created`/
+        // `card-updated`/`dispatch-updated` — a dropped SSE connection also misses `card-event`
+        // broadcasts, which have no cursor of their own. Resync every thread that's currently
+        // hydrated (a card whose Thread.tsx is/was actually rendering it) by re-fetching its full
+        // event list; setEvents() merges rather than replaces, so nothing landed via appendEvent
+        // during this fetch gets clobbered. Cards not yet hydrated don't need this — Thread.tsx's
+        // own mount effect (store/feed.ts's loadedEventCardIds) will do a full fetch the first
+        // time it renders them regardless of what SSE has or hasn't delivered.
+        const hydratedCardIds = [...useFeed.getState().loadedEventCardIds];
+        for (const cardId of hydratedCardIds) {
+          const evRes = await fetchCardEvents(cardId);
+          if (evRes.status === 'ok') useFeed.getState().setEvents(cardId, evRes.events);
+        }
       }
       connectedOnce = true;
     };

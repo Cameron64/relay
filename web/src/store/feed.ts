@@ -19,6 +19,15 @@ interface FeedState {
   // that listCards()/getCard's feed payload must never carry the full thread just to show a badge.
   // Absent key = "never loaded this card's thread"; Thread.tsx is what decides when to load it.
   events: Record<string, CardEvent[]>;
+  // Review fix: "has an entry in `events`" and "has done a REAL fetchCardEvents() hydration" are
+  // NOT the same thing — appendEvent (an SSE 'card-event' broadcast, or an optimistic local post)
+  // can seed events[cardId] with a single message before Thread.tsx ever mounts for that card
+  // (cold app start, SSE reconnect while a pending card already has multi-message history).
+  // loadedEventCardIds is set ONLY by setEvents (a completed full fetch), so Thread.tsx can gate
+  // its one-time hydration fetch on "did we ever actually fetch the whole thread", not on "is the
+  // slice merely non-empty" — otherwise a single live-delivered event permanently skips the fetch
+  // and the rest of the thread's history is silently lost from view.
+  loadedEventCardIds: Set<string>;
   newestCursor: string | null;
   newestDispatchCursor: string | null;
   flashIds: Set<string>;
@@ -34,8 +43,9 @@ interface FeedState {
   // sender sees their message immediately, without waiting for the SSE echo) and the SSE
   // 'card-event' broadcast (so OTHER open tabs/devices see it live). De-duped by seq so the two
   // paths landing for the same event is harmless. Initializes the slice to [] if it wasn't loaded
-  // yet — safe because the only way to append BEFORE a load is posting the card's first-ever
-  // message, so "previously unloaded" and "previously empty" are the same state in that case.
+  // yet so the message isn't dropped — but does NOT mark the card as "loaded" (see
+  // loadedEventCardIds above): a card whose thread has real prior history still needs its one real
+  // fetchCardEvents() the first time Thread.tsx renders it, even if a live event beat that fetch.
   appendEvent: (cardId: string, event: CardEvent) => void;
   clear: () => void;
 }
@@ -44,6 +54,7 @@ export const useFeed = create<FeedState>((set) => ({
   cards: [],
   dispatches: [],
   events: {},
+  loadedEventCardIds: new Set<string>(),
   newestCursor: null,
   newestDispatchCursor: null,
   flashIds: new Set<string>(),
@@ -104,8 +115,21 @@ export const useFeed = create<FeedState>((set) => ({
       return { flashIds };
     }),
 
+  // Review fix: MERGE with whatever's already in the slice instead of blindly replacing it. A full
+  // fetchCardEvents() (Thread.tsx's initial hydration, or useSSE.ts's reconnect backfill) can land
+  // AFTER an SSE 'card-event' broadcast already appended a newer event via appendEvent for the same
+  // card — a plain replace would silently drop that concurrently-arrived event. Dedupe by seq
+  // (a seq present in both is the same event either way) and keep the union.
   setEvents: (cardId, events) =>
-    set((s) => ({ events: { ...s.events, [cardId]: [...events].sort((a, b) => a.seq - b.seq) } })),
+    set((s) => {
+      const bySeq = new Map<number, CardEvent>();
+      for (const e of events) bySeq.set(e.seq, e);
+      for (const e of s.events[cardId] ?? []) if (!bySeq.has(e.seq)) bySeq.set(e.seq, e);
+      const merged = [...bySeq.values()].sort((a, b) => a.seq - b.seq);
+      const loadedEventCardIds = new Set(s.loadedEventCardIds);
+      loadedEventCardIds.add(cardId);
+      return { events: { ...s.events, [cardId]: merged }, loadedEventCardIds };
+    }),
 
   appendEvent: (cardId, event) =>
     set((s) => {
@@ -115,5 +139,14 @@ export const useFeed = create<FeedState>((set) => ({
       return { events: { ...s.events, [cardId]: merged } };
     }),
 
-  clear: () => set({ cards: [], dispatches: [], events: {}, newestCursor: null, newestDispatchCursor: null, flashIds: new Set<string>() }),
+  clear: () =>
+    set({
+      cards: [],
+      dispatches: [],
+      events: {},
+      loadedEventCardIds: new Set<string>(),
+      newestCursor: null,
+      newestDispatchCursor: null,
+      flashIds: new Set<string>(),
+    }),
 }));

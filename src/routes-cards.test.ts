@@ -124,6 +124,21 @@ describe('GET /cards/:id/response — events_since (Plan 04 thread awareness)', 
     expect(body.status).toBe('pending'); // timed out — no user event landed
   });
 
+  // Review fix: waitForEvents (event-waiters.ts) wakes on ANY card_event, agent or user role — an
+  // agent-role append must not truncate the caller's `wait` budget. Assert ELAPSED TIME (not just
+  // the returned status) so a regression that returns early can't hide behind a passing status
+  // assertion the way the bug above did before this fix.
+  test('an agent-role append does not truncate the wait budget — the poll honors the full wait=N', async () => {
+    const card = createCard(input());
+    const started = Date.now();
+    const pollP = getResponse(card.id, '?wait=1&events_since=0');
+    await postAgentEvent(card.id, 'unrelated agent chatter');
+    const body = await json(await pollP);
+    const elapsed = Date.now() - started;
+    expect(body.status).toBe('pending');
+    expect(elapsed).toBeGreaterThanOrEqual(900); // ~1s wait honored, not an early bail-out
+  });
+
   test('events_since filters out events at or before the given seq', async () => {
     const card = createCard(input());
     await postUserEvent(card.id, 'first question'); // seq 1

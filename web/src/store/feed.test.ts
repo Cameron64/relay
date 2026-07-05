@@ -152,5 +152,36 @@ describe('feed store', () => {
       useFeed.getState().clear();
       expect(useFeed.getState().events).toEqual({});
     });
+
+    // Review fix: distinguish "fully hydrated via a real fetchCardEvents()" from "has some
+    // entries" — appendEvent alone must never make Thread.tsx skip its one-time full fetch.
+    describe('loadedEventCardIds (review fix)', () => {
+      it('setEvents marks the card as fully loaded', () => {
+        expect(useFeed.getState().loadedEventCardIds.has('c1')).toBe(false);
+        useFeed.getState().setEvents('c1', [event('c1', 1)]);
+        expect(useFeed.getState().loadedEventCardIds.has('c1')).toBe(true);
+      });
+
+      it('appendEvent alone does NOT mark the card as fully loaded', () => {
+        useFeed.getState().appendEvent('c1', event('c1', 1));
+        expect(useFeed.getState().events.c1).toHaveLength(1); // visible immediately
+        expect(useFeed.getState().loadedEventCardIds.has('c1')).toBe(false); // but not "hydrated"
+      });
+
+      it('clear() resets loadedEventCardIds too', () => {
+        useFeed.getState().setEvents('c1', [event('c1', 1)]);
+        useFeed.getState().clear();
+        expect(useFeed.getState().loadedEventCardIds.has('c1')).toBe(false);
+      });
+
+      // Review fix: setEvents (a completed fetchCardEvents()) must MERGE with, not clobber, an
+      // event that arrived via appendEvent (an SSE 'card-event' broadcast) while that fetch was
+      // still in flight — otherwise the concurrently-arrived event is silently dropped.
+      it('setEvents merges with events already appended live during the fetch, instead of dropping them', () => {
+        useFeed.getState().appendEvent('c1', event('c1', 2)); // arrives via SSE mid-fetch
+        useFeed.getState().setEvents('c1', [event('c1', 1)]); // the fetch's own (now-stale) snapshot
+        expect(useFeed.getState().events.c1.map((e) => e.seq)).toEqual([1, 2]);
+      });
+    });
   });
 });

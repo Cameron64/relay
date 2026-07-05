@@ -14,21 +14,24 @@ import type { Card } from '../../types';
 // readable thread text and are filtered out.
 //
 // Hydration: fetches the full thread ONCE on mount if the card has any prior events AND this
-// card's slice hasn't been loaded into the store yet (store/feed.ts's `events` record is keyed by
-// card id, absent = "never loaded"). After that it stays live purely via the SSE 'card-event'
-// broadcast (useSSE.ts) — this component never re-fetches. If a local optimistic append (asking a
-// question — see Actions.tsx / ChoiceCard.tsx / PromptReply.tsx) seeded the slice before this
-// effect ran, `loaded !== undefined` already holds and the fetch is skipped (nothing lost: the
-// slice already reflects everything that's happened so far).
+// card hasn't completed a REAL fetchCardEvents() hydration yet (store/feed.ts's
+// `loadedEventCardIds` — set only by setEvents, never by appendEvent). After that it stays live
+// purely via the SSE 'card-event' broadcast (useSSE.ts) — this component never re-fetches.
+// Gating on `loadedEventCardIds` rather than on "does events[card.id] have anything" matters: an
+// SSE 'card-event' broadcast (or a local optimistic append — see Actions.tsx / ChoiceCard.tsx /
+// PromptReply.tsx) can seed the slice with a single live event before this effect ever runs (cold
+// app start, SSE reconnect while a pending card already has multi-message history) — if that alone
+// skipped the fetch, the rest of the thread's history would be silently lost from view.
 const COLLAPSE_AFTER = 4;
 
 export function Thread({ card }: { card: Card }) {
   const loaded = useFeed((s) => s.events[card.id]);
+  const hydrated = useFeed((s) => s.loadedEventCardIds.has(card.id));
   const setEvents = useFeed((s) => s.setEvents);
   const [expanded, setExpanded] = useState(false);
 
   useEffect(() => {
-    if (loaded !== undefined) return; // already have this card's thread (fetched, or seeded locally)
+    if (hydrated) return; // already did a real full fetch for this card's thread
     if (!card.event_count) return; // nothing to fetch yet — a live append will seed the slice
     let cancelled = false;
     fetchCardEvents(card.id).then((r) => {
@@ -38,7 +41,7 @@ export function Thread({ card }: { card: Card }) {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [card.id, card.event_count]);
+  }, [card.id, card.event_count, hydrated]);
 
   const messages = (loaded ?? []).filter((e) => e.type === 'message');
   if (!messages.length) return null;
