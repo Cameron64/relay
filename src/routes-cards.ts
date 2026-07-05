@@ -265,6 +265,9 @@ appRoutes.get('/cards/:id/response', requireWrite, async (c) => {
   const card = cards.getCard(id);
   if (!card) return c.json({ error: 'not found' }, 404);
   if (card.status === 'responded') return c.json({ status: 'responded', response: card.response });
+  // Dismissed cards are marked for deletion (expires_at set) but linger until the next
+  // sweepExpired() tick — resolve pollers immediately instead of making them wait out the sweep.
+  if (card.status === 'dismissed') return c.json({ error: 'not found' }, 404);
   const waitN = Number(c.req.query('wait') || '0');
   const waitMs = Math.min(Math.max(Number.isFinite(waitN) ? waitN : 0, 0), 55) * 1000;
   if (waitMs <= 0) return c.json({ status: 'pending' });
