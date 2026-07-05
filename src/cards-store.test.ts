@@ -16,6 +16,9 @@ import {
   sweepExpired,
   getAsset,
   pruneCards,
+  validateCardEventInput,
+  appendCardEvent,
+  listCardEvents,
   __resetForTests,
 } from './cards-store.ts';
 
@@ -332,6 +335,99 @@ describe('assets', () => {
     const a = getAsset(card.id, card.assets[0].id);
     expect(a?.mime).toBe('image/png');
     expect(Array.from(a!.bytes)).toEqual([1, 2, 3, 4, 5]);
+  });
+});
+
+describe('card_events', () => {
+  test('append assigns seq 1..n in order', () => {
+    const card = createCard(input({ kind: 'note' }));
+    const e1 = appendCardEvent(card.id, { role: 'agent', type: 'message', body: 'hi' });
+    const e2 = appendCardEvent(card.id, { role: 'user', type: 'message', body: 'hi back' });
+    expect(e1.ok && e1.value.seq).toBe(1);
+    expect(e2.ok && e2.value.seq).toBe(2);
+    expect(listCardEvents(card.id).map((e) => e.seq)).toEqual([1, 2]);
+  });
+
+  test('sinceSeq filters to events after that seq', () => {
+    const card = createCard(input({ kind: 'note' }));
+    appendCardEvent(card.id, { role: 'agent', type: 'message', body: 'one' });
+    appendCardEvent(card.id, { role: 'agent', type: 'message', body: 'two' });
+    appendCardEvent(card.id, { role: 'agent', type: 'message', body: 'three' });
+    const after1 = listCardEvents(card.id, { sinceSeq: 1 });
+    expect(after1.map((e) => e.body)).toEqual(['two', 'three']);
+  });
+
+  test('user-role append requires status pending; agent-role append works on any status', () => {
+    const card = createCard(
+      input({ kind: 'approval', buttons: [{ id: 'approved', label: 'A', behavior: 'respond', verdict: 'approved' }] }),
+    );
+    respondCard(card.id, { action: 'approved' });
+    const userAppend = appendCardEvent(card.id, { role: 'user', type: 'message', body: 'too late' });
+    expect(userAppend.ok).toBe(false);
+    const agentAppend = appendCardEvent(card.id, { role: 'agent', type: 'message', body: 'got it, thanks' });
+    expect(agentAppend.ok).toBe(true);
+  });
+
+  test('append to an unknown card fails with "card not found"', () => {
+    const r = appendCardEvent('nope', { role: 'agent', type: 'message', body: 'x' });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toContain('not found');
+  });
+
+  test('rejects a message body over its cap; allows a payload body up to its larger cap', () => {
+    const card = createCard(input({ kind: 'note' }));
+    const overMessage = appendCardEvent(card.id, { role: 'agent', type: 'message', body: 'x'.repeat(16 * 1024 + 1) });
+    expect(overMessage.ok).toBe(false);
+    const atPayloadCap = appendCardEvent(card.id, { role: 'agent', type: 'payload', body: 'x'.repeat(64 * 1024) });
+    expect(atPayloadCap.ok).toBe(true);
+  });
+
+  test('caps a card at CARD_EVENT_MAX_PER_CARD events', () => {
+    const card = createCard(input({ kind: 'note' }));
+    for (let i = 0; i < 200; i++) {
+      expect(appendCardEvent(card.id, { role: 'agent', type: 'message', body: `m${i}` }).ok).toBe(true);
+    }
+    expect(appendCardEvent(card.id, { role: 'agent', type: 'message', body: 'one too many' }).ok).toBe(false);
+  });
+
+  test('events are deleted when their card is swept', () => {
+    const past = new Date(Date.now() - 1000).toISOString();
+    const card = createCard(input({ kind: 'note', expires_at: past }));
+    appendCardEvent(card.id, { role: 'agent', type: 'message', body: 'bye' });
+    sweepExpired();
+    const orphan = db.query('SELECT COUNT(*) AS n FROM card_events WHERE card_id = $id').get({ $id: card.id }) as any;
+    expect(orphan.n).toBe(0);
+  });
+
+  test('events are deleted when their card is pruned', () => {
+    process.env.CARD_RETENTION_DAYS = '30';
+    process.env.CARD_MAX = '500';
+    const card = createCard(input({ kind: 'note' }));
+    appendCardEvent(card.id, { role: 'agent', type: 'message', body: 'bye' });
+    db.query('UPDATE cards SET created_at = $t WHERE id = $id').run({
+      $t: new Date(Date.now() - 60 * 86400_000).toISOString(),
+      $id: card.id,
+    });
+    pruneCards();
+    const orphan = db.query('SELECT COUNT(*) AS n FROM card_events WHERE card_id = $id').get({ $id: card.id }) as any;
+    expect(orphan.n).toBe(0);
+  });
+
+  test('validateCardEventInput defaults type to message and enforces the cap', () => {
+    const ok = validateCardEventInput({ body: 'hi' });
+    expect(ok.ok).toBe(true);
+    if (ok.ok) expect(ok.value.type).toBe('message');
+    expect(validateCardEventInput({ type: 'nonsense', body: 'hi' }).ok).toBe(false);
+    expect(validateCardEventInput({ type: 'message' }).ok).toBe(false);
+  });
+
+  test('getCard reports event_count; listCards never includes it', () => {
+    const card = createCard(input({ kind: 'note' }));
+    appendCardEvent(card.id, { role: 'agent', type: 'message', body: 'a' });
+    appendCardEvent(card.id, { role: 'agent', type: 'message', body: 'b' });
+    expect(getCard(card.id)?.event_count).toBe(2);
+    const fromList = listCards().find((c) => c.id === card.id) as any;
+    expect(fromList?.event_count).toBeUndefined();
   });
 });
 

@@ -22,7 +22,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { pathToFileURL } from 'node:url';
-import { loadConfig, projectFromCwd } from '../lib/relay-lib.mjs';
+import { loadConfig, projectFromCwd, sessionIdFromEnv } from '../lib/relay-lib.mjs';
 import { createCard, pollResponse, sendNotify } from '../lib/relay-client.mjs';
 import { buildCardPayload, buildChoicePayload, buildAskPayload, buildPagePayload, parseTtl, VERDICT_ALIAS } from './relay.mjs';
 
@@ -91,7 +91,7 @@ export function cardArgsToPayload(args, ctx = {}) {
     priority: args.high ? 'high' : 'normal',
     push: true,
     expiresAt: ttlToExpiresAt(args.ttl),
-    source: { cwd: ctx.cwd ?? null, host: ctx.host ?? null },
+    source: { cwd: ctx.cwd ?? null, host: ctx.host ?? null, sessionId: ctx.sessionId ?? null },
   });
 }
 
@@ -103,7 +103,7 @@ export function askArgsToPayload(args, ctx = {}) {
   if (args.high) flags.high = true;
   if (args.ttl === 'keep') flags.keep = true;
   else if (args.ttl != null) flags.ttl = args.ttl;
-  return buildAskPayload(flags, { cwd: ctx.cwd ?? null, host: ctx.host ?? null });
+  return buildAskPayload(flags, { cwd: ctx.cwd ?? null, host: ctx.host ?? null, sessionId: ctx.sessionId ?? null });
 }
 
 export function choiceArgsToPayload(args, ctx = {}) {
@@ -120,7 +120,7 @@ export function choiceArgsToPayload(args, ctx = {}) {
     priority: args.high ? 'high' : 'normal',
     push: true,
     expiresAt: ttlToExpiresAt(args.ttl),
-    source: { cwd: ctx.cwd ?? null, host: ctx.host ?? null },
+    source: { cwd: ctx.cwd ?? null, host: ctx.host ?? null, sessionId: ctx.sessionId ?? null },
   });
 }
 
@@ -134,7 +134,7 @@ export function pageArgsToPayload(args, ctx = {}) {
     priority: args.high ? 'high' : 'normal',
     push: true,
     expiresAt: ttlToExpiresAt(args.ttl),
-    source: { cwd: ctx.cwd ?? null, host: ctx.host ?? null },
+    source: { cwd: ctx.cwd ?? null, host: ctx.host ?? null, sessionId: ctx.sessionId ?? null },
   });
 }
 
@@ -350,7 +350,7 @@ export async function handleCall(name, rawArgs) {
       'Relay is not configured. Run: relay init --url <https://your-app.up.railway.app> --token <WRITE_TOKEN>  (or set RELAY_URL and RELAY_WRITE_TOKEN).',
     );
   }
-  const ctx = { cwd: safeCwd(), host: process.env.COMPUTERNAME || process.env.HOSTNAME || null };
+  const ctx = { cwd: safeCwd(), host: process.env.COMPUTERNAME || process.env.HOSTNAME || null, sessionId: sessionIdFromEnv() };
   try {
     switch (name) {
       case 'relay_notify': {
@@ -362,6 +362,7 @@ export async function handleCall(name, rawArgs) {
           cwd: ctx.cwd,
           project: projectFromCwd(ctx.cwd),
           host: ctx.host,
+          sessionId: ctx.sessionId,
         });
         return okResult(r.ok ? { status: 'sent', ok: true } : { status: 'sent', ok: false, reason: r.reason || 'push-unavailable' });
       }

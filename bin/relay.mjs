@@ -20,7 +20,7 @@ import { readFileSync, existsSync, mkdirSync, writeFileSync, rmSync } from 'node
 import { join, extname } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { spawn } from 'node:child_process';
-import { loadConfig, configPath, relayDir, armedDir, sessionKey, afkPath, readAfk, projectFromCwd } from '../lib/relay-lib.mjs';
+import { loadConfig, configPath, relayDir, armedDir, sessionKey, afkPath, readAfk, projectFromCwd, sessionIdFromEnv } from '../lib/relay-lib.mjs';
 
 const PER_POLL_CAP = 50; // server caps at 55; leave margin
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -163,7 +163,7 @@ export function parseOptionSpec(spec) {
 // v1 drafts take LINK buttons only. Respond buttons are deliberately rejected: they would
 // collide with the editor's intrinsic copy toolbar and a respond-click's `card-updated` SSE
 // would rebuild the card from the ORIGINAL body, wiping in-progress edits.
-export function buildDraftPayload(flags, { stdin = '', cwd = '', host = null, assets = [] } = {}) {
+export function buildDraftPayload(flags, { stdin = '', cwd = '', host = null, sessionId = null, assets = [] } = {}) {
   const title = typeof flags.title === 'string' ? flags.title : null;
   if (!title) throw new Error('relay draft: --title is required');
   let body = typeof flags.body === 'string' ? flags.body : null;
@@ -175,7 +175,7 @@ export function buildDraftPayload(flags, { stdin = '', cwd = '', host = null, as
     kind: 'draft',
     title,
     body,
-    source: { cwd, host, editable: true },
+    source: { cwd, host, sessionId, editable: true },
     buttons,
     priority: flags.high ? 'high' : 'normal',
     push: flags.push ? true : false, // auto-open makes a push to the same box redundant; --push opts in
@@ -188,7 +188,7 @@ export function buildDraftPayload(flags, { stdin = '', cwd = '', host = null, as
 // answer comes back via --wait as verdict 'reply' with the text in `reply`/`note`. buildAskPayload
 // is PURE (no fs/network) so it's unit-testable; cmdAsk pre-reads stdin and passes it in. Push
 // defaults TRUE — a question needs to reach the phone — unlike `relay draft` which auto-opens locally.
-export function buildAskPayload(flags, { stdin = '', cwd = '', host = null } = {}) {
+export function buildAskPayload(flags, { stdin = '', cwd = '', host = null, sessionId = null } = {}) {
   const title = typeof flags.title === 'string' ? flags.title : null;
   if (!title) throw new Error('relay ask: --title is required');
   let body = typeof flags.body === 'string' ? flags.body : null;
@@ -210,7 +210,7 @@ export function buildAskPayload(flags, { stdin = '', cwd = '', host = null } = {
     buttons: [],
     priority: flags.high ? 'high' : 'normal',
     push: flags['no-push'] ? false : true,
-    source: { cwd, host, ...(placeholder ? { placeholder } : {}) },
+    source: { cwd, host, sessionId, ...(placeholder ? { placeholder } : {}) },
     ...(expires_at ? { expires_at } : {}),
   };
 }
@@ -389,6 +389,7 @@ async function cmdNotify(cfg, flags) {
     cwd,
     project: projectFromCwd(cwd),
     host: process.env.COMPUTERNAME || process.env.HOSTNAME || null,
+    sessionId: sessionIdFromEnv(),
   };
   let res;
   try {
@@ -545,7 +546,7 @@ async function cmdCard(cfg, flags) {
     priority: flags.high ? 'high' : 'normal',
     push: flags['no-push'] ? false : true,
     expiresAt,
-    source: { cwd: process.cwd(), host: process.env.COMPUTERNAME || process.env.HOSTNAME || null },
+    source: { cwd: process.cwd(), host: process.env.COMPUTERNAME || process.env.HOSTNAME || null, sessionId: sessionIdFromEnv() },
     pushBody: typeof flags['push-body'] === 'string' ? flags['push-body'] : null,
   });
 
@@ -592,7 +593,7 @@ async function cmdChoice(cfg, flags) {
     priority: flags.high ? 'high' : 'normal',
     push: flags['no-push'] ? false : true,
     expiresAt,
-    source: { cwd: process.cwd(), host: process.env.COMPUTERNAME || process.env.HOSTNAME || null },
+    source: { cwd: process.cwd(), host: process.env.COMPUTERNAME || process.env.HOSTNAME || null, sessionId: sessionIdFromEnv() },
   });
   return createAndWait(cfg, payload, flags, 'choice');
 }
@@ -605,7 +606,7 @@ async function cmdAsk(cfg, flags) {
   const host = process.env.COMPUTERNAME || process.env.HOSTNAME || null;
   let payload;
   try {
-    payload = buildAskPayload(flags, { stdin, cwd: process.cwd(), host });
+    payload = buildAskPayload(flags, { stdin, cwd: process.cwd(), host, sessionId: sessionIdFromEnv() });
   } catch (e) {
     die(e.message);
   }
@@ -624,7 +625,7 @@ async function cmdDraft(cfg, flags) {
 
   let payload;
   try {
-    payload = buildDraftPayload(flags, { stdin, cwd: process.cwd(), host, assets });
+    payload = buildDraftPayload(flags, { stdin, cwd: process.cwd(), host, sessionId: sessionIdFromEnv(), assets });
   } catch (e) {
     die(e.message);
   }

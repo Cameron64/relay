@@ -83,4 +83,20 @@ export interface Card {
   response?: CardResponse | null;
   created_at: string;
   expires_at?: string | null;
+  // COUNT(*) of this card's card_events — present on GET /api/cards/:id (single-card fetch) only,
+  // NEVER on the feed list (see cards-store.ts's getCard). Absent = not fetched yet, not "zero".
+  event_count?: number;
+}
+
+// One row of a card's append-only event thread (mirrors src/cards-store.ts CardEvent), fetched via
+// GET /api/cards/:id/events (UI) or /api/cards/:id/agent-events (write) — separate from the frozen
+// single-verdict `response` above. No UI renders these yet; Plan 04 builds the thread view and
+// Plan 05 uses type:'payload' for structured page-submit results.
+export interface CardEvent {
+  card_id: string;
+  seq: number;
+  role: 'agent' | 'user';
+  type: 'message' | 'payload';
+  body: string;
+  at: string;
 }

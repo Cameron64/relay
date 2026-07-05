@@ -60,7 +60,41 @@ export type Card = {
   expires_at: string | null;
   push_sent: boolean;
   assets: { id: string; mime: string }[];
+  // Cheap COUNT(*) of this card's card_events, attached ONLY by getCard (single-card fetch) —
+  // NEVER by listCards, so the feed payload doesn't pay for a join/subquery per card just to
+  // show a thread badge nobody asked for yet (see Plan 00's "Gotchas").
+  event_count?: number;
 };
+
+// card_events — an append-only, ordered channel attached to a card, richer than the frozen
+// single-verdict `response` (respond/wait stays exactly as-is; see the master roadmap doc §4).
+// 'message' events are thread text (Plan 04); 'payload' events are structured JSON (Plan 05's
+// page-submit bridge). role:'agent' rows come from the write-token side (CLI/MCP/hooks/runner);
+// role:'user' rows come from the browser. Both share this one shape so a listener never needs to
+// know which side wrote a given event.
+export type CardEventRole = 'agent' | 'user';
+export type CardEventType = 'message' | 'payload';
+
+export type CardEvent = {
+  card_id: string;
+  seq: number;
+  role: CardEventRole;
+  type: CardEventType;
+  body: string;
+  at: string;
+};
+
+// The part of a CardEvent the caller supplies; seq/at are always server-assigned.
+export type CardEventInput = {
+  role: CardEventRole;
+  type: CardEventType;
+  body: string;
+};
+
+// Caps mirror the page_html cap above: keep a single event, and a whole card's event thread, from
+// bloating the SQLite row / the SSE `card-event` broadcast.
+export const CARD_EVENT_BODY_MAX = { message: 16 * 1024, payload: 64 * 1024 } as const;
+export const CARD_EVENT_MAX_PER_CARD = 200;
 
 export type CardInput = {
   kind: string;
@@ -149,6 +183,15 @@ export function ensureCardsSchema(): void {
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
       CREATE INDEX IF NOT EXISTS idx_assets_card ON card_assets(card_id);
+      CREATE TABLE IF NOT EXISTS card_events (
+        card_id  TEXT NOT NULL,
+        seq      INTEGER NOT NULL,
+        role     TEXT NOT NULL,
+        type     TEXT NOT NULL,
+        body     TEXT NOT NULL,
+        at       TEXT NOT NULL,
+        PRIMARY KEY (card_id, seq)
+      );
     `);
     // Migration: `options` was added after the table shipped. CREATE TABLE IF NOT EXISTS won't add
     // it to an existing prod DB, so add it idempotently (SQLite allows ADD COLUMN with NOT NULL when
@@ -283,6 +326,23 @@ export function validateCardInput(body: unknown): Ok<CardInput> | Err {
   };
 }
 
+// --- card_events validation (exported for unit tests) ----------------------
+// Only `type`/`body` come from the request body — `role` is decided by the ROUTE (which auth
+// header matched: write -> 'agent', UI cookie -> 'agent-events' vs 'events' path), never trusted
+// from client input. See routes-cards.ts's two-path split (master doc §6: never merge the auth
+// middlewares).
+export function validateCardEventInput(body: unknown): Ok<{ type: CardEventType; body: string }> | Err {
+  if (typeof body !== 'object' || body === null) return { ok: false, error: 'body must be an object' };
+  const b = body as Record<string, unknown>;
+  const type = b.type === undefined ? 'message' : b.type;
+  if (type !== 'message' && type !== 'payload') return { ok: false, error: 'type must be "message" or "payload"' };
+  const text = typeof b.body === 'string' ? b.body : null;
+  if (!text) return { ok: false, error: 'body required' };
+  const max = CARD_EVENT_BODY_MAX[type];
+  if (text.length > max) return { ok: false, error: `event body exceeds ${max} bytes for type "${type}"` };
+  return { ok: true, value: { type, body: text } };
+}
+
 // --- CRUD ------------------------------------------------------------------
 
 function hydrate(row: any): Card {
@@ -348,7 +408,10 @@ export function createCard(value: CardInput, assets: { mime: string; bytes: Uint
 export function getCard(id: string): Card | null {
   const row = db.query('SELECT * FROM cards WHERE id = $id').get({ $id: id }) as any;
   if (!row) return null;
-  return hydrate(row);
+  const card = hydrate(row);
+  const countRow = db.query('SELECT COUNT(*) AS n FROM card_events WHERE card_id = $id').get({ $id: id }) as { n: number };
+  card.event_count = countRow.n;
+  return card;
 }
 
 export function listCards(opts: { since?: string; limit?: number } = {}): Card[] {
@@ -409,6 +472,47 @@ export function respondCard(id: string, input: { action: string; note?: string |
   return tx();
 }
 
+// Append one event to a card's thread. Transaction so the existence/status check, the per-card cap
+// count, and the seq computation ("next free slot") can't race a concurrent append onto the same
+// card. role:'user' appends are gated to pending cards (mirrors the intent of respondCard: once the
+// human has moved on, a UI-side event shouldn't reopen the thread); role:'agent' appends are allowed
+// on any status ("got it, thanks" after the human already answered is fine).
+export function appendCardEvent(cardId: string, input: CardEventInput): Ok<CardEvent> | Err {
+  const max = CARD_EVENT_BODY_MAX[input.type];
+  if (input.body.length > max) return { ok: false, error: `event body exceeds ${max} bytes for type "${input.type}"` };
+  const tx = db.transaction((): Ok<CardEvent> | Err => {
+    const row = db.query('SELECT status FROM cards WHERE id = $id').get({ $id: cardId }) as any;
+    if (!row) return { ok: false, error: 'card not found' };
+    if (input.role === 'user' && row.status !== 'pending') return { ok: false, error: 'card is not pending' };
+    const countRow = db.query('SELECT COUNT(*) AS n FROM card_events WHERE card_id = $cid').get({ $cid: cardId }) as { n: number };
+    if (countRow.n >= CARD_EVENT_MAX_PER_CARD) return { ok: false, error: `card has reached the max of ${CARD_EVENT_MAX_PER_CARD} events` };
+    const seqRow = db.query('SELECT COALESCE(MAX(seq), 0) AS m FROM card_events WHERE card_id = $cid').get({ $cid: cardId }) as { m: number };
+    const seq = seqRow.m + 1;
+    const at = new Date().toISOString();
+    db.query('INSERT INTO card_events (card_id, seq, role, type, body, at) VALUES ($cid, $seq, $role, $type, $body, $at)').run({
+      $cid: cardId,
+      $seq: seq,
+      $role: input.role,
+      $type: input.type,
+      $body: input.body,
+      $at: at,
+    });
+    return { ok: true, value: { card_id: cardId, seq, role: input.role, type: input.type, body: input.body, at } };
+  });
+  return tx();
+}
+
+export function listCardEvents(cardId: string, opts: { sinceSeq?: number } = {}): CardEvent[] {
+  const rows = opts.sinceSeq
+    ? (db
+        .query('SELECT card_id, seq, role, type, body, at FROM card_events WHERE card_id = $cid AND seq > $since ORDER BY seq ASC')
+        .all({ $cid: cardId, $since: opts.sinceSeq }) as CardEvent[])
+    : (db
+        .query('SELECT card_id, seq, role, type, body, at FROM card_events WHERE card_id = $cid ORDER BY seq ASC')
+        .all({ $cid: cardId }) as CardEvent[]);
+  return rows;
+}
+
 export function getAsset(cardId: string, assetId: string): { mime: string; bytes: Uint8Array } | null {
   const row = db.query('SELECT mime, bytes FROM card_assets WHERE id = $aid AND card_id = $cid').get({
     $aid: assetId,
@@ -442,6 +546,7 @@ export function sweepExpired(): string[] {
     const tx = db.transaction(() => {
       db.query('DELETE FROM cards WHERE expires_at IS NOT NULL AND expires_at <= $now').run({ $now: now });
       db.query('DELETE FROM card_assets WHERE card_id NOT IN (SELECT id FROM cards)').run();
+      db.query('DELETE FROM card_events WHERE card_id NOT IN (SELECT id FROM cards)').run();
     });
     tx();
   }
@@ -457,11 +562,12 @@ export function pruneCards(): void {
       'DELETE FROM cards WHERE id NOT IN (SELECT id FROM cards ORDER BY created_at DESC, id DESC LIMIT $max)',
     ).run({ $max: max });
     db.query('DELETE FROM card_assets WHERE card_id NOT IN (SELECT id FROM cards)').run();
+    db.query('DELETE FROM card_events WHERE card_id NOT IN (SELECT id FROM cards)').run();
   });
   tx();
 }
 
-/** Test-only: wipe both tables. Guarded so it can't run against a real volume by accident. */
+/** Test-only: wipe all cards tables. Guarded so it can't run against a real volume by accident. */
 export function __resetForTests(): void {
-  db.exec('DELETE FROM card_assets; DELETE FROM cards;');
+  db.exec('DELETE FROM card_assets; DELETE FROM card_events; DELETE FROM cards;');
 }

@@ -230,5 +230,9 @@ API with no frontend.
 | GET | `/api/cards` · `/api/cards/:id` | UI | feed / one card |
 | POST | `/api/cards/:id/respond` | UI | record a verdict |
 | GET | `/api/cards/:id/response?wait=N` | write | long-poll the verdict |
+| POST | `/api/cards/:id/events` | UI | append a thread event (role:'user') |
+| GET | `/api/cards/:id/events?since_seq=N&wait=S` | UI | list/long-poll events after seq N |
+| POST | `/api/cards/:id/agent-events` | write | append a thread event (role:'agent') |
+| GET | `/api/cards/:id/agent-events?since_seq=N&wait=S` | write | list/long-poll events after seq N |
 | GET | `/api/cards/:id/asset/:aid` | UI | image bytes |
 | GET | `/api/stream` | UI | SSE live feed |

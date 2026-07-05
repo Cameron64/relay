@@ -15,7 +15,7 @@ describe('cardArgsToPayload', () => {
     expect(p.body).toBe('b');
     expect(p.push).toBe(true);
     expect(p.buttons).toEqual([]);
-    expect(p.source).toEqual({ cwd: '/w', host: 'H' });
+    expect(p.source).toEqual({ cwd: '/w', host: 'H', sessionId: null });
   });
 
   test('kind=approval auto-adds Approve / Request changes respond buttons', () => {
@@ -115,7 +115,7 @@ describe('pageArgsToPayload', () => {
     expect(p.page_html).toBe('<!doctype html><p>hi</p>');
     expect(p.buttons).toEqual([]);
     expect(p.push).toBe(true);
-    expect(p.source).toEqual({ cwd: '/w', host: 'H' });
+    expect(p.source).toEqual({ cwd: '/w', host: 'H', sessionId: null });
   });
 
   test('high → priority high; copy → copy_text; ttl "keep" → far-future expiry', () => {

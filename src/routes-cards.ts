@@ -10,15 +10,24 @@
 //   POST /api/cards/:id/respond       record verdict, resolve --wait + SSE     (UI)
 //   POST /api/cards/:id/dismiss       clear a card from the feed               (UI)
 //   GET  /api/cards/:id/response      long-poll the verdict (?wait=N)          (write)
+//   POST /api/cards/:id/events        append a thread event, role:'user'       (UI)
+//   GET  /api/cards/:id/events        list/long-poll events (?since_seq&wait)  (UI)
+//   POST /api/cards/:id/agent-events  append a thread event, role:'agent'      (write)
+//   GET  /api/cards/:id/agent-events  list/long-poll events (?since_seq&wait)  (write)
 //   GET  /api/cards/:id/asset/:aid    image bytes                              (UI)
+//
+// The events endpoints are deliberately split into a UI path and a write path (rather than one
+// handler composing both auth middlewares) so the auth split stays legible — master doc §6.
 
 import { Hono } from 'hono';
+import type { Context } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { requireUi, requireWrite, handleUnlock } from './session.ts';
 import * as cards from './cards-store.ts';
 import { isPushConfigured, sendPushToAll } from './push.ts';
 import { recordNotify, listNotifications, notifyLogReady, pruneNotifyLog } from './notify-log.ts';
 import { waitForResponse, resolveWaiters } from './waiters.ts';
+import { waitForEvents, notifyEventWaiters } from './event-waiters.ts';
 import { addClient, removeClient, hubSize, broadcast } from './stream.ts';
 
 export const appRoutes = new Hono();
@@ -263,6 +272,61 @@ appRoutes.get('/cards/:id/response', requireWrite, async (c) => {
   if (resp) return c.json({ status: 'responded', response: resp });
   return c.json({ status: 'pending' });
 });
+
+// --- card events (thread messages / structured payloads) -------------------
+// Append-only richer channel alongside the frozen single-verdict `response` (master doc §4). See
+// the card_events table + appendCardEvent/listCardEvents in cards-store.ts. `role` is fixed per
+// route (never read from the request body) — the UI path always writes/reads role:'user', the
+// write-token path always writes/reads role:'agent'. No push notification on append; events are
+// silent in this plan (Plan 04 decides push behavior for threads).
+function eventsPostHandler(role: cards.CardEventRole) {
+  return async (c: Context) => {
+    if (!cards.cardsReady()) return notReady(c);
+    const id = c.req.param('id') as string;
+    let body: any;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: 'invalid JSON body' }, 400);
+    }
+    const v = cards.validateCardEventInput(body);
+    if (!v.ok) return c.json({ error: v.error }, 400);
+    const result = cards.appendCardEvent(id, { role, type: v.value.type, body: v.value.body });
+    if (!result.ok) {
+      const status = result.error === 'card not found' ? 404 : result.error === 'card is not pending' ? 409 : 400;
+      return c.json({ error: result.error }, status);
+    }
+    notifyEventWaiters(id);
+    await broadcast('card-event', { cardId: id, event: result.value });
+    return c.json({ ok: true, event: result.value });
+  };
+}
+
+// Bounded long-poll (?wait=N, capped at 55s like /response) — resolves as soon as ANY new event
+// lands, then re-lists from the same since_seq so the caller gets everything that landed while it
+// was parked, not just a "there's something new" flag.
+function eventsGetHandler() {
+  return async (c: Context) => {
+    if (!cards.cardsReady()) return notReady(c);
+    const id = c.req.param('id') as string;
+    if (!cards.getCard(id)) return c.json({ error: 'not found' }, 404);
+    const sinceRaw = Number(c.req.query('since_seq') || '0');
+    const sinceSeq = Number.isFinite(sinceRaw) && sinceRaw > 0 ? sinceRaw : undefined;
+    let events = cards.listCardEvents(id, { sinceSeq });
+    const waitN = Number(c.req.query('wait') || '0');
+    const waitMs = Math.min(Math.max(Number.isFinite(waitN) ? waitN : 0, 0), 55) * 1000;
+    if (events.length === 0 && waitMs > 0) {
+      const hasNew = await waitForEvents(id, waitMs);
+      if (hasNew) events = cards.listCardEvents(id, { sinceSeq });
+    }
+    return c.json({ events });
+  };
+}
+
+appRoutes.post('/cards/:id/events', requireUi, eventsPostHandler('user'));
+appRoutes.get('/cards/:id/events', requireUi, eventsGetHandler());
+appRoutes.post('/cards/:id/agent-events', requireWrite, eventsPostHandler('agent'));
+appRoutes.get('/cards/:id/agent-events', requireWrite, eventsGetHandler());
 
 // --- asset bytes (UI side) -------------------------------------------------
 appRoutes.get('/cards/:id/asset/:aid', requireUi, (c) => {
