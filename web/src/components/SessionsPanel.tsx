@@ -74,13 +74,15 @@ function SessionRow({
     upsertDispatch(r.dispatch);
   };
 
-  // Row actions are mutually exclusive, in priority order: a runner-backed job's Cancel/Follow-up
-  // beats the needs-input deep-link (a session can be BOTH — e.g. a follow-up dispatch whose
-  // resulting session is now also asking a permission question — but the job action is the more
-  // actionable one), which beats the generic "open Activity filtered to this session" fallback.
+  // Row actions can combine: a runner-backed job's Cancel/Follow-up is shown alongside the
+  // needs-input deep-link rather than mutually excluding it — a dispatch that's claimed/running
+  // (claude_session populated, per dispatch-store.ts's updateDispatchStatus) can ALSO be the
+  // session that just hit a permission/approval card, and that's the single most likely
+  // needs-input case for an unattended headless dispatch. Only Cancel/Follow-up are dispatch-
+  // status-gated; Answer-it is driven purely by session.status/pendingCardId.
   const showCancel = dispatch?.status === 'queued';
   const showFollowUp = dispatch?.status === 'done';
-  const showAnswerIt = !dispatch && pendingCardId;
+  const showAnswerIt = session.status === 'needs-input' && !!pendingCardId;
   const canOpenActivity = !dispatch && !pendingCardId && !!session.sessionId;
 
   const onRowClick = canOpenActivity ? () => onOpenActivity(session.sessionId!) : undefined;

@@ -203,12 +203,14 @@ export function Activity({
   // Fetch fresh each time the drawer opens (the trail changes constantly as sessions ping), and
   // seed the session filter from the caller's initialSessionId — SessionsPanel's row action opens
   // this ALREADY pre-filtered; the plain "Activity" button in TopBar opens it with null (no filter).
+  // Also re-seeds on a bare initialSessionId change while the drawer stays open (opened stays true):
+  // the drawer instance is shared between TopBar's button and every SessionsPanel row action, so a
+  // caller can retarget it to a different session (or clear to none) without a close/reopen cycle.
   useEffect(() => {
     if (!opened) return;
     setSessionFilter(initialSessionId);
     void load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [opened, load]);
+  }, [opened, initialSessionId, load]);
 
   // Only offer chips for the sources/events actually present in this page of the trail.
   const presentSources = useMemo(() => {
