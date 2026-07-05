@@ -1,4 +1,4 @@
-import type { Card, CardResponse, NotifyLogEntry } from './types';
+import type { Card, CardResponse, Dispatch, DispatchTarget, NotifyLogEntry } from './types';
 
 // All UI-side calls carry the relay_session httpOnly cookie (set at /api/unlock).
 export function api(path: string, opts: RequestInit = {}): Promise<Response> {
@@ -99,4 +99,74 @@ export async function dismiss(cardId: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+// --- dispatches (Plan 02: phone -> queued job -> desktop runner) -----------
+
+export type DispatchesResult =
+  | { status: 'ok'; dispatches: Dispatch[] }
+  | { status: 'unauth' }
+  | { status: 'warming' }
+  | { status: 'error' };
+
+export async function fetchDispatches(since?: string | null): Promise<DispatchesResult> {
+  const path = '/api/dispatches' + (since ? '?since=' + encodeURIComponent(since) : '');
+  let res: Response;
+  try {
+    res = await api(path);
+  } catch {
+    return { status: 'error' };
+  }
+  if (res.status === 401) return { status: 'unauth' };
+  if (res.status === 503) return { status: 'warming' };
+  if (!res.ok) return { status: 'error' };
+  const data = await res.json().catch(() => ({ dispatches: [] }));
+  return { status: 'ok', dispatches: data.dispatches || [] };
+}
+
+export type TargetsResult = { status: 'ok'; targets: DispatchTarget[] } | { status: 'warming' } | { status: 'error' };
+
+export async function fetchDispatchTargets(): Promise<TargetsResult> {
+  let res: Response;
+  try {
+    res = await api('/api/dispatch-targets');
+  } catch {
+    return { status: 'error' };
+  }
+  if (res.status === 503) return { status: 'warming' };
+  if (!res.ok) return { status: 'error' };
+  const data = await res.json().catch(() => ({ targets: [] }));
+  return { status: 'ok', targets: data.targets || [] };
+}
+
+export type ComposeResult = { status: 'ok'; dispatch: Dispatch } | { status: 'error'; error: string };
+
+export async function composeDispatch(input: { title?: string | null; body: string; target: string; resume_of?: string | null }): Promise<ComposeResult> {
+  let res: Response;
+  try {
+    res = await api('/api/dispatches', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(input),
+    });
+  } catch {
+    return { status: 'error', error: 'network error' };
+  }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) return { status: 'error', error: data.error || `HTTP ${res.status}` };
+  return { status: 'ok', dispatch: data.dispatch as Dispatch };
+}
+
+export type CancelDispatchResult = { status: 'ok'; dispatch: Dispatch } | { status: 'error'; error: string };
+
+export async function cancelDispatch(id: string): Promise<CancelDispatchResult> {
+  let res: Response;
+  try {
+    res = await api(`/api/dispatches/${id}/cancel`, { method: 'POST' });
+  } catch {
+    return { status: 'error', error: 'network error' };
+  }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) return { status: 'error', error: data.error || `HTTP ${res.status}` };
+  return { status: 'ok', dispatch: data.dispatch as Dispatch };
 }

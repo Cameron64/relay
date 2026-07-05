@@ -3,8 +3,10 @@ import { serveStatic } from 'hono/bun';
 import { existsSync } from 'node:fs';
 import { pushRoutes } from './routes-push.ts';
 import { appRoutes } from './routes-cards.ts';
+import { dispatchRoutes } from './routes-dispatch.ts';
 import { store } from './store.ts';
 import { ensureCardsSchema, cardsReady, sweepExpired } from './cards-store.ts';
+import { ensureDispatchSchema, dispatchReady, pruneDispatches } from './dispatch-store.ts';
 import { ensureNotifyLogSchema } from './notify-log.ts';
 import { broadcast } from './stream.ts';
 
@@ -42,12 +44,22 @@ try {
   console.error('[relay] cards schema init failed — card routes will 503 until storage recovers');
 }
 
+// Dispatch-store schema init: same product-critical treatment as cards (see the warning in
+// dispatch-store.ts's ensureDispatchSchema) — failure here 503s the dispatch routes, never the
+// process boot / health check.
+try {
+  ensureDispatchSchema();
+} catch {
+  console.error('[relay] dispatch schema init failed — dispatch routes will 503 until storage recovers');
+}
+
 // Notification audit log: best-effort init (it degrades silently — see notify-log.ts). A failure
 // here only disables /api/notifications; push delivery and the card feed are unaffected.
 ensureNotifyLogSchema();
 
 app.route('/api', pushRoutes); // -> /api/push/*, /api/notify
 app.route('/api', appRoutes); // -> /api/unlock, /api/stream, /api/cards/*
+app.route('/api', dispatchRoutes); // -> /api/dispatches/*, /api/dispatch-targets
 
 // --- expiry sweep -----------------------------------------------------------
 // Cards carry an expires_at (explicit --ttl, or a kind-based default — see cards-store.ts). This
@@ -61,6 +73,16 @@ if (SWEEP_MS > 0) {
       for (const id of sweepExpired()) void broadcast('card-removed', { id });
     } catch (err) {
       console.error('[relay] expiry sweep failed:', err);
+    }
+    // Dispatch retention piggybacks on the same interval rather than a second scheduler (master
+    // doc §1's spirit: one mechanism, not two). No broadcast on prune — pruned rows are already
+    // terminal (done/failed/cancelled) and long past any client caring about their removal.
+    if (dispatchReady()) {
+      try {
+        pruneDispatches();
+      } catch (err) {
+        console.error('[relay] dispatch retention sweep failed:', err);
+      }
     }
   }, SWEEP_MS);
   (timer as { unref?: () => void }).unref?.();

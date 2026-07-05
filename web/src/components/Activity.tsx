@@ -32,6 +32,7 @@ const SOURCE_LABEL: Record<NotifySource, string> = {
   cli: 'relay notify (CLI)',
   mcp: 'relay_notify (MCP)',
   card: 'card',
+  dispatch: 'dispatch failure',
   unknown: 'unknown',
 };
 
@@ -41,6 +42,7 @@ const SOURCE_COLOR: Record<NotifySource, string> = {
   cli: 'gray',
   mcp: 'cyan',
   card: 'grape',
+  dispatch: 'red',
   unknown: 'gray',
 };
 

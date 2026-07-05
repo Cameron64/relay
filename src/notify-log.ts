@@ -18,9 +18,11 @@ import { randomBytes } from 'node:crypto';
 import { db } from './store.ts';
 
 // Where a push originated. 'notification'/'stop' are the global Claude Code hooks; 'cli' is
-// `relay notify`; 'mcp' is the relay_notify tool; 'card' is a card push (/api/cards). 'unknown'
-// is the fallback for a caller that sent no source.
-export type NotifySource = 'notification' | 'stop' | 'cli' | 'mcp' | 'card' | 'unknown';
+// `relay notify`; 'mcp' is the relay_notify tool; 'card' is a card push (/api/cards); 'dispatch'
+// is the server's own "your queued job failed" push (see routes-dispatch.ts — a runner *success*
+// posts a result card, source 'card'; only *failure* has no card behind it, hence this source).
+// 'unknown' is the fallback for a caller that sent no source.
+export type NotifySource = 'notification' | 'stop' | 'cli' | 'mcp' | 'card' | 'dispatch' | 'unknown';
 
 export type NotifyLogEntry = {
   id: string;
@@ -67,7 +69,7 @@ export type RecordNotifyInput = {
   delivered?: boolean | number; // default true (1); pass false for a logged-but-not-pushed row
 };
 
-const VALID_SOURCES = new Set<NotifySource>(['notification', 'stop', 'cli', 'mcp', 'card', 'unknown']);
+const VALID_SOURCES = new Set<NotifySource>(['notification', 'stop', 'cli', 'mcp', 'card', 'dispatch', 'unknown']);
 
 let _ready = false;
 export function notifyLogReady(): boolean {

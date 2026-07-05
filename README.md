@@ -82,8 +82,12 @@ A Vite + React + TypeScript SPA on Mantine. Notable pieces:
 - `web/src/components/` — `CardView` dispatches by card `kind`; `cards/EditableDraft.tsx` is the
   TipTap WYSIWYG editor (StarterKit + Link + Table) seeded once from the draft's markdown, with
   Copy formatted / Copy plain / per-asset Copy image.
-- `web/src/store/feed.ts` — Zustand feed store (newest-first upsert; SSE-safe).
-- `web/src/hooks/` — `useSSE` (live feed + reconnect backfill), `usePush` (Web Push subscribe).
+- `web/src/store/feed.ts` — Zustand feed store: a `cards` slice (newest-first upsert; SSE-safe) and
+  a separate `dispatches` slice (same shape, updated by the `dispatch-updated` SSE event).
+- `web/src/hooks/` — `useSSE` (live feed + reconnect backfill for both slices), `usePush` (Web Push
+  subscribe).
+- `web/src/components/Compose.tsx` / `DispatchItem.tsx` — the phone-brainstorm compose view (opened
+  from TopBar's `+`) and the dispatch status card `Feed.tsx` interleaves with regular cards.
 - `web/src/service-worker.js` — Workbox `injectManifest` precache + Relay's push handlers; emitted
   to `dist/service-worker.js` (same url as before, so existing clients upgrade in place).
 
@@ -131,6 +135,22 @@ does ONE bounded long-poll (≤50s). If you don't answer in time it exits **3** 
 card id; Claude then re-issues `relay poll <id> --wait=50` in a fresh call, repeating until you
 respond. Arbitrarily long deliberation, every call within the limit. The verdict is persisted
 server-side, so a re-poll always reads the final answer.
+
+## The dispatch runner (`bin/relay-runner.mjs`) — phone brainstorm → desktop agent
+
+The direct answer to "I want to brainstorm on my phone with no session open, and have an agent on
+my desktop pick it up." Compose a dispatch on the phone (the `+` button; a `Compose` view for long
+text + an optional title + a target picker) → it lands `queued` in a durable server-side table →
+an always-on runner on your desktop long-polls for it, claims it, spawns a headless
+`claude -p` in a pre-approved project directory, and reports back — success posts a result **card**
+(which pushes to the phone on its own); failure gets a plain push. Replying to a finished dispatch
+("Follow-up") resumes the same Claude session via `--resume`.
+
+**Security invariant**: the server only ever stores a target *id* + free text, never a cwd/command.
+The runner resolves ids against its own local `~/.relay/runner.json` — a compromised server/DB can
+feed odd text to a pre-approved project, never run an arbitrary command. See `src/dispatch-store.ts`
+and `runner/SETUP.md` for the full picture and setup instructions (Windows Startup-folder wiring
+included: `runner/start.bat` / `start-hidden.vbs` / `install-startup.bat`).
 
 ## Templates
 
@@ -246,4 +266,13 @@ API with no frontend.
 | POST | `/api/cards/:id/agent-events` | write | append a thread event (role:'agent') |
 | GET | `/api/cards/:id/agent-events?since_seq=N&wait=S` | write | list/long-poll events after seq N |
 | GET | `/api/cards/:id/asset/:aid` | UI | image bytes |
-| GET | `/api/stream` | UI | SSE live feed |
+| GET | `/api/stream` | UI | SSE live feed (also carries `dispatch-updated`) |
+| POST | `/api/dispatches` | UI | compose a dispatch: `{title?, body, target, resume_of?}` |
+| GET | `/api/dispatches` | UI | list dispatches (`?status=&since=&limit=`) |
+| GET | `/api/dispatches/:id` | UI | one dispatch |
+| POST | `/api/dispatches/:id/cancel` | UI | cancel — only while still `queued` |
+| GET | `/api/dispatches/next?wait=N` | write | runner long-poll for its next job |
+| POST | `/api/dispatches/:id/claim` | write | atomic claim (`changes=0` → conflict) |
+| POST | `/api/dispatches/:id/status` | write | `running`\|`done`\|`failed`, legal transitions only |
+| GET | `/api/dispatch-targets` | UI | union of every runner's announced `{id,label}` targets |
+| POST | `/api/dispatch-targets` | write | a runner replaces its own target list wholesale |

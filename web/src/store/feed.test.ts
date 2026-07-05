@@ -1,9 +1,28 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { useFeed } from './feed';
-import type { Card } from '../types';
+import type { Card, Dispatch } from '../types';
 
 function card(id: string, created_at: string, extra: Partial<Card> = {}): Card {
   return { id, title: 't' + id, kind: 'note', status: 'pending', created_at, ...extra };
+}
+
+function dispatch(id: string, created_at: string, extra: Partial<Dispatch> = {}): Dispatch {
+  return {
+    id,
+    created_at,
+    title: 't' + id,
+    body: 'body',
+    target: 'notes',
+    status: 'queued',
+    runner_host: null,
+    claimed_at: null,
+    finished_at: null,
+    resume_of: null,
+    claude_session: null,
+    result_summary: null,
+    result_card_id: null,
+    ...extra,
+  };
 }
 
 describe('feed store', () => {
@@ -50,5 +69,41 @@ describe('feed store', () => {
     useFeed.getState().remove('a');
     expect(useFeed.getState().cards.map((c) => c.id)).toEqual(['b']);
     expect(useFeed.getState().flashIds.has('a')).toBe(false);
+  });
+
+  // Plan 02 acceptance: "Feed store test: dispatch slice upsert via SSE event" — upsertDispatch is
+  // the exact handler useSSE.ts wires to the 'dispatch-updated' event.
+  describe('dispatch slice', () => {
+    it('keeps dispatches newest-first, independent of the cards list', () => {
+      useFeed.getState().upsert(card('c1', '2026-06-14T09:00:00Z'));
+      useFeed.getState().upsertDispatch(dispatch('a', '2026-06-14T10:00:00Z'));
+      useFeed.getState().upsertDispatch(dispatch('b', '2026-06-14T11:00:00Z'));
+      expect(useFeed.getState().dispatches.map((d) => d.id)).toEqual(['b', 'a']);
+      expect(useFeed.getState().cards.map((c) => c.id)).toEqual(['c1']);
+    });
+
+    it('replaces by id without duplicating (e.g. queued -> claimed -> running -> done)', () => {
+      useFeed.getState().upsertDispatch(dispatch('a', '2026-06-14T10:00:00Z', { status: 'queued' }));
+      useFeed.getState().upsertDispatch(dispatch('a', '2026-06-14T10:00:00Z', { status: 'claimed', runner_host: 'cam-desktop' }));
+      useFeed.getState().upsertDispatch(dispatch('a', '2026-06-14T10:00:00Z', { status: 'done', result_summary: 'did the thing' }));
+      expect(useFeed.getState().dispatches).toHaveLength(1);
+      expect(useFeed.getState().dispatches[0].status).toBe('done');
+      expect(useFeed.getState().dispatches[0].result_summary).toBe('did the thing');
+    });
+
+    it('tracks newestDispatchCursor as the max created_at', () => {
+      useFeed.getState().upsertDispatch(dispatch('a', '2026-06-14T10:00:00Z'));
+      useFeed.getState().upsertDispatch(dispatch('b', '2026-06-14T11:00:00Z'));
+      expect(useFeed.getState().newestDispatchCursor).toBe('2026-06-14T11:00:00Z');
+    });
+
+    it('clear() resets both the card and dispatch slices', () => {
+      useFeed.getState().upsert(card('c1', '2026-06-14T09:00:00Z'));
+      useFeed.getState().upsertDispatch(dispatch('a', '2026-06-14T10:00:00Z'));
+      useFeed.getState().clear();
+      expect(useFeed.getState().cards).toHaveLength(0);
+      expect(useFeed.getState().dispatches).toHaveLength(0);
+      expect(useFeed.getState().newestDispatchCursor).toBeNull();
+    });
   });
 });

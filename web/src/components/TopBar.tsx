@@ -30,7 +30,7 @@ async function hardRefresh(): Promise<void> {
   location.reload();
 }
 
-export function TopBar({ showLock, onLock }: { showLock: boolean; onLock: () => void }) {
+export function TopBar({ showLock, onLock, onCompose }: { showLock: boolean; onLock: () => void; onCompose?: () => void }) {
   const { setColorScheme } = useMantineColorScheme();
   const computed = useComputedColorScheme('light', { getInitialValueInEffect: true });
   const push = usePush();
@@ -56,6 +56,14 @@ export function TopBar({ showLock, onLock }: { showLock: boolean; onLock: () => 
       </Group>
 
       <Group gap="xs" align="center">
+        {onCompose ? (
+          <Tooltip label="New dispatch — send a brainstorm to your desktop" openDelay={300}>
+            <ActionIcon variant="filled" color="indigo" onClick={onCompose} aria-label="New dispatch">
+              +
+            </ActionIcon>
+          </Tooltip>
+        ) : null}
+
         {push.supported ? (
           <Tooltip label={push.status} disabled={!push.status} openDelay={300}>
             <Button

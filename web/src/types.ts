@@ -45,7 +45,7 @@ export interface CardSource {
 
 // One row of the notification audit trail (mirrors src/notify-log.ts NotifyLogEntry). Read back
 // by the Activity drawer to answer "why did I get that push, and which session sent it?".
-export type NotifySource = 'notification' | 'stop' | 'cli' | 'mcp' | 'card' | 'unknown';
+export type NotifySource = 'notification' | 'stop' | 'cli' | 'mcp' | 'card' | 'dispatch' | 'unknown';
 
 export interface NotifyLogEntry {
   id: string;
@@ -99,4 +99,33 @@ export interface CardEvent {
   type: 'message' | 'payload';
   body: string;
   at: string;
+}
+
+// Mirrors src/dispatch-store.ts's Dispatch — the phone-brainstorm -> queued-job -> desktop-runner
+// bridge (relay-roadmap Plan 02). Composed with the UI cookie, claimed/run/reported by the runner
+// with the write token. Carries a runner-local TARGET ID only — never a cwd/command (see the
+// security invariant in dispatch-store.ts) — so the phone never learns real filesystem paths.
+export type DispatchStatus = 'queued' | 'claimed' | 'running' | 'done' | 'failed' | 'cancelled';
+
+export interface Dispatch {
+  id: string;
+  created_at: string;
+  title: string | null;
+  body: string;
+  target: string;
+  status: DispatchStatus;
+  runner_host: string | null;
+  claimed_at: string | null;
+  finished_at: string | null;
+  resume_of: string | null;
+  claude_session: string | null;
+  result_summary: string | null;
+  result_card_id: string | null;
+}
+
+// One entry of GET /api/dispatch-targets — an {id,label} pair a runner announced on startup. The
+// compose picker's <Select> options; never carries a path (see dispatch-store.ts).
+export interface DispatchTarget {
+  id: string;
+  label: string;
 }
