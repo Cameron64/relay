@@ -92,7 +92,7 @@ describe('buildDraftPayload', () => {
     expect(p.kind).toBe('draft');
     expect(p.title).toBe('Msg to team');
     expect(p.body).toBe('## hi');
-    expect(p.source).toEqual({ cwd: '/work', host: 'BOX', editable: true });
+    expect(p.source).toEqual({ cwd: '/work', host: 'BOX', sessionId: null, editable: true });
   });
   test('defaults push to false; --push opts in', () => {
     expect(buildDraftPayload({ title: 'T' }, {}).push).toBe(false);
@@ -129,7 +129,7 @@ describe('buildAskPayload', () => {
     expect(p.title).toBe('What next?');
     expect(p.buttons).toEqual([]);
     expect(p.push).toBe(true); // a question must reach the phone
-    expect(p.source).toEqual({ cwd: '/work', host: 'BOX' });
+    expect(p.source).toEqual({ cwd: '/work', host: 'BOX', sessionId: null });
   });
   test('--no-push opts out of the push', () => {
     expect(buildAskPayload({ title: 'T', 'no-push': true }, {}).push).toBe(false);

@@ -1,5 +1,6 @@
 import { test, expect, describe } from 'bun:test';
-import { waitForResponse, resolveWaiters, waiterCount } from './waiters.ts';
+import { waitForResponse, resolveWaiters, waiterCount, waitForResponseOrEvent } from './waiters.ts';
+import { notifyEventWaiters, eventWaiterCount } from './event-waiters.ts';
 import type { CardResponse } from './cards-store.ts';
 
 const resp = (verdict: string): CardResponse => ({ verdict, action: verdict, note: null, at: new Date().toISOString() });
@@ -35,5 +36,45 @@ describe('waiters', () => {
     expect(r).toBeNull();
     expect(() => resolveWaiters('c4', resp('approved'))).not.toThrow();
     expect(waiterCount('c4')).toBe(0);
+  });
+});
+
+// Plan 04: composed race between this module's verdict waiters and event-waiters.ts's card_events
+// waiters — the mechanism the /response route uses when a caller opts in with ?events_since=N.
+describe('waitForResponseOrEvent', () => {
+  test('resolves "responded" when the verdict lands first', async () => {
+    const p = waitForResponseOrEvent('t1', 5000);
+    resolveWaiters('t1', resp('approved')); // resolving the verdict waiter cleans IT up immediately
+    const r = await p;
+    expect(r.kind).toBe('responded');
+    if (r.kind === 'responded') expect(r.resp.verdict).toBe('approved');
+    expect(waiterCount('t1')).toBe(0);
+    // The composed event-side waiter is still parked, self-cleaning on its own 5s timeout — the
+    // outer race settling doesn't cancel it (see the module comment); nothing to assert here.
+  });
+
+  test('resolves "event" when a new card_event lands first', async () => {
+    const p = waitForResponseOrEvent('t2', 5000);
+    notifyEventWaiters('t2'); // resolving the event waiter cleans IT up immediately
+    const r = await p;
+    expect(r.kind).toBe('event');
+    expect(eventWaiterCount('t2')).toBe(0);
+    // The composed verdict-side waiter is still parked, self-cleaning on its own 5s timeout.
+  });
+
+  test('resolves "pending" once both underlying waits time out with nothing new', async () => {
+    const r = await waitForResponseOrEvent('t3', 30);
+    expect(r.kind).toBe('pending');
+    expect(waiterCount('t3')).toBe(0);
+  });
+
+  test('a verdict landing after an unrelated event notify for the SAME card still resolves "event" first (whichever fires first wins)', async () => {
+    // Simulates: agent is polling with events_since set, the human asks a question (fires first),
+    // then later answers (a second, later resolveWaiters call is a no-op against this settled poll).
+    const p = waitForResponseOrEvent('t4', 5000);
+    notifyEventWaiters('t4');
+    const r = await p;
+    expect(r.kind).toBe('event');
+    resolveWaiters('t4', resp('approved')); // harmless no-op — this poll already settled
   });
 });

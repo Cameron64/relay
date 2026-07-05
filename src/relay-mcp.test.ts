@@ -1,9 +1,9 @@
 // Tests the MCP server's PURE pieces (bin/relay-mcp.mjs): the tool-args -> API-payload mappers,
 // the verdict formatter, and the tool definitions. Importing the .mjs does NOT start the stdio
 // server (the import.meta.main / argv entry guard stays false under the test runner).
-import { test, expect, describe } from 'bun:test';
+import { test, expect, describe, afterEach } from 'bun:test';
 // @ts-ignore — zero-dep .mjs server has no .d.ts
-import { cardArgsToPayload, askArgsToPayload, choiceArgsToPayload, pageArgsToPayload, formatResponse, TOOL_DEFS } from '../bin/relay-mcp.mjs';
+import { cardArgsToPayload, askArgsToPayload, choiceArgsToPayload, pageArgsToPayload, formatResponse, withPagePayload, TOOL_DEFS } from '../bin/relay-mcp.mjs';
 // @ts-ignore — zero-dep .mjs has no .d.ts
 import { buildPagePayload } from '../bin/relay.mjs';
 
@@ -15,7 +15,7 @@ describe('cardArgsToPayload', () => {
     expect(p.body).toBe('b');
     expect(p.push).toBe(true);
     expect(p.buttons).toEqual([]);
-    expect(p.source).toEqual({ cwd: '/w', host: 'H' });
+    expect(p.source).toEqual({ cwd: '/w', host: 'H', sessionId: null });
   });
 
   test('kind=approval auto-adds Approve / Request changes respond buttons', () => {
@@ -115,7 +115,7 @@ describe('pageArgsToPayload', () => {
     expect(p.page_html).toBe('<!doctype html><p>hi</p>');
     expect(p.buttons).toEqual([]);
     expect(p.push).toBe(true);
-    expect(p.source).toEqual({ cwd: '/w', host: 'H' });
+    expect(p.source).toEqual({ cwd: '/w', host: 'H', sessionId: null });
   });
 
   test('high → priority high; copy → copy_text; ttl "keep" → far-future expiry', () => {
@@ -127,6 +127,12 @@ describe('pageArgsToPayload', () => {
   test('throws without a title or without html', () => {
     expect(() => pageArgsToPayload({ html: '<p>x</p>' }, {})).toThrow(/title/);
     expect(() => pageArgsToPayload({ title: 'T' }, {})).toThrow(/html/);
+  });
+
+  // relay-roadmap Plan 05 — the page-submit bridge.
+  test('expectResponse defaults false and maps to expects_response:true when set', () => {
+    expect(pageArgsToPayload({ title: 'T', html: '<p>x</p>' }, {}).expects_response).toBe(false);
+    expect(pageArgsToPayload({ title: 'T', html: '<p>x</p>', expectResponse: true }, {}).expects_response).toBe(true);
   });
 });
 
@@ -141,6 +147,11 @@ describe('buildPagePayload', () => {
   test('throws without a title or without pageHtml', () => {
     expect(() => buildPagePayload({ pageHtml: '<p>x</p>' })).toThrow(/title/);
     expect(() => buildPagePayload({ title: 'T' })).toThrow(/html/);
+  });
+
+  test('expectsResponse defaults false; true sets expects_response on the payload', () => {
+    expect(buildPagePayload({ title: 'T', pageHtml: '<p>x</p>' }).expects_response).toBe(false);
+    expect(buildPagePayload({ title: 'T', pageHtml: '<p>x</p>', expectsResponse: true }).expects_response).toBe(true);
   });
 });
 
@@ -168,12 +179,83 @@ describe('formatResponse', () => {
     expect(r.status).toBe('notfound');
     expect(r.id).toBe('id4');
   });
+
+  // relay-roadmap Plan 04 — card threads: a poll made with eventsSince can come back as
+  // status:'event' (a human message landed instead of a verdict) rather than being swallowed as
+  // a plain timeout.
+  describe('status "event" (Plan 04 card threads)', () => {
+    test('surfaces the events array and points the caller at relay_reply + resuming relay_poll', () => {
+      const events = [{ card_id: 'id5', seq: 3, role: 'user', type: 'message', body: 'why this migration?', at: 't' }];
+      const r = formatResponse({ status: 'event', events }, 'id5');
+      expect(r.status).toBe('event');
+      expect(r.id).toBe('id5');
+      expect(r.events).toEqual(events);
+      expect(r.sinceSeq).toBe(3);
+      expect(r.message).toContain('relay_reply');
+      expect(r.message).toContain('relay_poll');
+    });
+
+    test('sinceSeq falls back to 0 when events is empty', () => {
+      const r = formatResponse({ status: 'event', events: [] }, 'id6');
+      expect(r.sinceSeq).toBe(0);
+    });
+  });
+});
+
+describe('withPagePayload', () => {
+  const cfg = { url: 'https://relay.test', writeToken: 'tok' };
+  const realFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  test('a non-submit verdict passes through untouched (no fetch)', async () => {
+    let fetched = false;
+    globalThis.fetch = (async () => {
+      fetched = true;
+      throw new Error('should not be called');
+    }) as any;
+    const formatted = { status: 'answered', verdict: 'approved', action: 'approved', note: null, id: 'id1' };
+    const r = await withPagePayload(cfg, formatted);
+    expect(r).toEqual(formatted);
+    expect(fetched).toBe(false);
+  });
+
+  test('a pending/notfound result passes through untouched', async () => {
+    const pending = { status: 'pending', id: 'id1', message: 'x' };
+    expect(await withPagePayload(cfg, pending)).toEqual(pending);
+  });
+
+  test('a submit verdict fetches events and inlines the latest payload row', async () => {
+    globalThis.fetch = (async () => ({
+      ok: true,
+      json: async () => ({
+        events: [
+          { card_id: 'id1', seq: 1, role: 'agent', type: 'message', body: 'hi', at: 't1' },
+          { card_id: 'id1', seq: 2, role: 'user', type: 'payload', body: JSON.stringify({ slider: 42 }), at: 't2' },
+        ],
+      }),
+    })) as any;
+    const formatted = { status: 'answered', verdict: 'submit', action: 'submit', note: null, id: 'id1' };
+    const r = await withPagePayload(cfg, formatted);
+    expect(r.payload).toEqual({ slider: 42 });
+    expect(r.status).toBe('answered');
+  });
+
+  test('a fetch failure degrades to payload:null rather than throwing', async () => {
+    globalThis.fetch = (async () => {
+      throw new Error('network down');
+    }) as any;
+    const formatted = { status: 'answered', verdict: 'submit', action: 'submit', note: null, id: 'id1' };
+    const r = await withPagePayload(cfg, formatted);
+    expect(r.payload).toBeNull();
+  });
 });
 
 describe('TOOL_DEFS', () => {
-  test('exposes the six relay tools, each with a description and input schema', () => {
+  test('exposes the seven relay tools, each with a description and input schema', () => {
     const names = TOOL_DEFS.map((t: any) => t.name).sort();
-    expect(names).toEqual(['relay_ask', 'relay_card', 'relay_choice', 'relay_notify', 'relay_page', 'relay_poll']);
+    expect(names).toEqual(['relay_ask', 'relay_card', 'relay_choice', 'relay_notify', 'relay_page', 'relay_poll', 'relay_reply']);
     for (const t of TOOL_DEFS) {
       expect(typeof t.description).toBe('string');
       expect(t.description.length).toBeGreaterThan(20);
@@ -187,5 +269,21 @@ describe('TOOL_DEFS', () => {
     expect(byName.relay_ask.inputSchema.required).toContain('title');
     expect(byName.relay_poll.inputSchema.required).toContain('id');
     expect(byName.relay_page.inputSchema.required).toEqual(['title', 'html']);
+  });
+
+  // relay-roadmap Plan 04 — card threads.
+  test('relay_poll exposes eventsSince; relay_reply requires id + body', () => {
+    const byName = Object.fromEntries(TOOL_DEFS.map((t: any) => [t.name, t]));
+    expect(byName.relay_poll.inputSchema.properties.eventsSince.type).toBe('number');
+    expect(byName.relay_reply.inputSchema.required).toEqual(['id', 'body']);
+    expect(byName.relay_reply.inputSchema.properties.body.type).toBe('string');
+  });
+
+  test('relay_page exposes expectResponse + waitSeconds and documents the submit protocol', () => {
+    const byName = Object.fromEntries(TOOL_DEFS.map((t: any) => [t.name, t]));
+    expect(byName.relay_page.inputSchema.properties.expectResponse.type).toBe('boolean');
+    expect(byName.relay_page.inputSchema.properties.waitSeconds.type).toBe('number');
+    expect(byName.relay_page.description).toContain('__relay');
+    expect(byName.relay_page.description).toContain('submit');
   });
 });

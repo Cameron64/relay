@@ -82,8 +82,16 @@ A Vite + React + TypeScript SPA on Mantine. Notable pieces:
 - `web/src/components/` — `CardView` dispatches by card `kind`; `cards/EditableDraft.tsx` is the
   TipTap WYSIWYG editor (StarterKit + Link + Table) seeded once from the draft's markdown, with
   Copy formatted / Copy plain / per-asset Copy image.
-- `web/src/store/feed.ts` — Zustand feed store (newest-first upsert; SSE-safe).
-- `web/src/hooks/` — `useSSE` (live feed + reconnect backfill), `usePush` (Web Push subscribe).
+- `web/src/store/feed.ts` — Zustand feed store: a `cards` slice (newest-first upsert; SSE-safe) and
+  a separate `dispatches` slice (same shape, updated by the `dispatch-updated` SSE event).
+- `web/src/hooks/` — `useSSE` (live feed + reconnect backfill for both slices), `usePush` (Web Push
+  subscribe).
+- `web/src/components/Compose.tsx` / `DispatchItem.tsx` — the phone-brainstorm compose view (opened
+  from TopBar's `+`) and the dispatch status card `Feed.tsx` interleaves with regular cards.
+- `web/src/components/SessionsPanel.tsx` / `Activity.tsx` — the Sessions dashboard (Plan 03) and
+  the notification audit drawer. Activity's open/close + session-filter state is lifted to
+  `App.tsx` (same pattern as `Compose`) so SessionsPanel's "open Activity for this session" row
+  action and TopBar's own "Activity" button share one drawer instance.
 - `web/src/service-worker.js` — Workbox `injectManifest` precache + Relay's push handlers; emitted
   to `dist/service-worker.js` (same url as before, so existing clients upgrade in place).
 
@@ -110,15 +118,19 @@ relay ask   --title T [--body B|--body-stdin] [--placeholder P]
             # push carries a "Reply" button that opens a text box; --wait returns the typed answer
 relay draft --title T [--body B|--body-stdin] [--image PATH]... [--link "Label=url"]...
             [--push] [--no-open] [--high]              # rich WYSIWYG-editable message card
-relay poll  <cardId> [--wait=SECS]                     # re-poll an existing card's verdict
+relay poll  <cardId> [--wait=SECS] [--events-since=N]  # re-poll an existing card's verdict
+            # --events-since: also resolve early on a new human thread message (card threads)
+relay reply <cardId> --body B|--body-stdin             # reply into a card's thread, no verdict
 relay arm "<label>" | relay disarm                    # arm/clear the Stop-hook "done" ping
 relay afk   [on [--reason R] | off | status]           # away-from-keyboard flag (~/.relay/afk.json)
 ```
 
 `--wait` / `poll` / `choice` / `ask` always print **one JSON line on stdout** with an explicit
-`status` (`answered` · `pending` · `notfound` · `error` · `created`) — key off that, not the exit
-code. A free-text answer (`relay ask`) comes back as verdict `reply` with the text in `note` and a
-top-level `reply` field. Exit codes mirror it: **0**=approved or reply · **20**=changes_requested ·
+`status` (`answered` · `event` · `pending` · `notfound` · `error` · `created`) — key off that, not
+the exit code. A free-text answer (`relay ask`) comes back as verdict `reply` with the text in
+`note` and a top-level `reply` field. `status:"event"` (only with `--events-since`) means a human
+sent a thread message instead of a verdict — see [Card threads](#card-threads) below. Exit codes
+mirror it: **0**=approved or reply · **20**=changes_requested · **21**=event ·
 **1**=other/dismissed verdict · **3**=timeout · **4**=notfound (expired/dismissed) · **5**=error
 (· **2**=usage).
 `relay afk status` exit codes: **0**=at desk · **10**=AFK (the command itself never fails; the code
@@ -131,6 +143,22 @@ does ONE bounded long-poll (≤50s). If you don't answer in time it exits **3** 
 card id; Claude then re-issues `relay poll <id> --wait=50` in a fresh call, repeating until you
 respond. Arbitrarily long deliberation, every call within the limit. The verdict is persisted
 server-side, so a re-poll always reads the final answer.
+
+## The dispatch runner (`bin/relay-runner.mjs`) — phone brainstorm → desktop agent
+
+The direct answer to "I want to brainstorm on my phone with no session open, and have an agent on
+my desktop pick it up." Compose a dispatch on the phone (the `+` button; a `Compose` view for long
+text + an optional title + a target picker) → it lands `queued` in a durable server-side table →
+an always-on runner on your desktop long-polls for it, claims it, spawns a headless
+`claude -p` in a pre-approved project directory, and reports back — success posts a result **card**
+(which pushes to the phone on its own); failure gets a plain push. Replying to a finished dispatch
+("Follow-up") resumes the same Claude session via `--resume`.
+
+**Security invariant**: the server only ever stores a target *id* + free text, never a cwd/command.
+The runner resolves ids against its own local `~/.relay/runner.json` — a compromised server/DB can
+feed odd text to a pre-approved project, never run an arbitrary command. See `src/dispatch-store.ts`
+and `runner/SETUP.md` for the full picture and setup instructions (Windows Startup-folder wiring
+included: `runner/start.bat` / `start-hidden.vbs` / `install-startup.bat`).
 
 ## Templates
 
@@ -179,10 +207,11 @@ claude mcp add relay -- node "/path/to/relay/bin/relay-mcp.mjs"
 |---|---|---|
 | `relay_notify` | no | fire-and-forget push |
 | `relay_card` | optional (`waitSeconds`) | post a note / approval / diagram card; block for a verdict |
-| `relay_page` | no | post an interactive HTML+JS page (charts, sims, explainers) rendered in a sandboxed iframe |
+| `relay_page` | optional (`expectResponse`) | post an interactive HTML+JS page (charts, sims, explainers) rendered in a sandboxed iframe; with `expectResponse:true` the page can `postMessage` a structured answer back and the tool blocks for it |
 | `relay_ask` | yes (default 50s) | open-ended question → free-text reply |
 | `relay_choice` | yes (default 50s) | pick one of several options |
-| `relay_poll` | yes (default 50s) | resume waiting on a card that returned `pending` |
+| `relay_poll` | yes (default 50s) | resume waiting on a card that returned `pending` or `event`; `eventsSince` opts into card threads |
+| `relay_reply` | no | reply into a card's thread without resolving its verdict |
 
 Blocking tools poll for a bounded window (`waitSeconds`, ≤ 280) that stays under the MCP client's
 per-call timeout (`MCP_TIMEOUT`); if no answer lands they return `{"status":"pending","id":…}` and
@@ -190,19 +219,111 @@ the agent calls `relay_poll` with that id — the same bounded-poll / re-poll pa
 Each result is one JSON object in the tool's text content. Built on `lib/relay-client.mjs` (a shared,
 side-effect-free HTTP client) plus the CLI's payload builders, so tool output matches the CLI's.
 
+### `relay_page` — pages can ask back (the submit bridge)
+
+`relay_page` is view-only by default. Pass `expectResponse: true` and the page can turn itself into
+a blocking question with a structured, typed answer — sliders, forms, ranked choices, whatever
+custom UI the agent invents. From inside the page:
+
+```js
+// Submit once; the parent only accepts the FIRST call and silently ignores the rest.
+window.parent.postMessage({ __relay: 'submit', payload: { /* any JSON, <= 64KB */ } }, '*');
+// Optional, right after load — swaps the app's plain page chrome for a "waiting for your input" banner:
+window.parent.postMessage({ __relay: 'ready', expectsResponse: true }, '*');
+```
+
+`'*'` as the target origin is correct: the sandboxed iframe has an opaque origin and can't name the
+parent's. The **parent** (`PageFrame.tsx`) validates the message by the sender's window identity
+(`event.source === <our iframe>.contentWindow`), never by origin — origin alone would accept a
+message from any other sandboxed frame in the same tab. `relay_page { expectResponse: true,
+waitSeconds }` blocks like `relay_ask`/`relay_choice` and returns
+`{ status:'answered', verdict:'submit', payload:{...}, id }`; `relay_poll` resumes the wait the same
+way and also inlines the payload. A ready-to-copy reference implementation (form fields + the two
+postMessage calls, done correctly) lives at `lib/page-templates/form-template.html`.
+
+## Card threads
+
+An approval/choice/prompt card doesn't have to end in one shot. Instead of answering, tap **Ask a
+question** (approval/choice) or **Send as question** (prompt) — that posts a message into the
+card's thread without resolving it, so the card stays pending. The waiting agent's next
+thread-aware poll sees it and can reply before you actually decide:
+
+```
+relay card --kind approval --title "Ship the migration?"     # create it, don't --wait
+relay poll <id> --wait=50 --events-since=0                   # verdict-or-thread-aware poll
+# stdout: {"status":"event","id":"<id>","events":[{"role":"user","body":"why this migration?",...}]}
+relay reply <id> --body "it fixes the N+1 on the dashboard"
+relay poll <id> --wait=50 --events-since=<seq from the reply>
+# ... you approve on your phone ...
+# stdout: {"status":"answered","verdict":"approved",...}
+```
+
+(`relay card/choice/ask --wait` themselves stay plain verdict-only polls, exactly as before this
+feature — thread awareness is opt-in via `relay poll --events-since`, so use `relay poll` for the
+resumable wait once you want it. The `relay_card`/`relay_ask`/`relay_choice` **MCP** tools, by
+contrast, surface thread events on their own blocking wait automatically — see below.)
+
+- **Server**: `GET /api/cards/:id/response` gains `&events_since=SEQ` — opt-in, resolves early on
+  EITHER the verdict landing or a new human (`role:'user'`) thread message; omit it and the route
+  behaves exactly as it did before this feature existed (every pre-existing CLI/MCP/hook caller).
+  An agent's own thread message pushes to your phone at high urgency (it's still blocked waiting);
+  your own messages never push back to yourself.
+- **MCP**: `relay_poll` takes `eventsSince`; a `status:"event"` result carries `events` + the
+  `sinceSeq` to resume from. `relay_reply({id, body})` answers into the thread without resolving
+  the card. `relay_card` / `relay_ask` / `relay_choice`'s blocking path surfaces `event` results
+  automatically instead of swallowing them as a plain timeout.
+- **CLI**: `relay poll <id> --events-since=N` / `relay reply <id> --body B`. `relay card/choice/ask
+  --wait` themselves stay verdict-only (no thread awareness) — resume with `relay poll
+  --events-since` to opt in.
+- The verdict itself is unchanged — a thread is a detour to *reach* the same one-shot
+  `respond`/`--wait` verdict every existing caller already understands, never a replacement for it.
+  No threads on view-only cards (note/diagram/image/draft/page).
+
 ## Claude Code hooks
 
-Two hooks (in `hooks/`) make the phone ping automatic. They are **inert until
-`~/.relay/config.json` exists**, hard-timeout fast, and always exit 0 — so they can never hang
-or break a session.
+Five hooks (in `hooks/`) make the phone ping automatic — and feed the Sessions dashboard. They are
+**inert until `~/.relay/config.json` exists**, hard-timeout fast, and always exit 0 — so they can
+never hang or break a session.
 
 - **Notification** → pushes "Claude needs you" when Claude is waiting on you.
 - **Stop** → if you ran `relay arm "<label>"` this session, pushes "✅ &lt;label&gt; — done" when
   the turn ends (and clears the flag). No arm = no ping, so ordinary turns stay quiet.
+- **PreToolUse** (`pretool-hook.mjs`) → the AFK permission bridge. **Triple-gated**: only does
+  anything when `~/.relay/config.json` exists AND `relay afk on` is flagged AND
+  `~/.relay/permission-rules.json` has a rule matching the tool call. When all three line up, it
+  posts a sticky **approval card** ("⚠ project — allow Bash?") instead of letting the call stall
+  at an unattended terminal, then bounded-polls for a verdict and maps it to a `PreToolUse`
+  decision: **Allow** → the tool runs; **Deny** (optionally with a typed note) → the call is
+  denied and Claude sees the note, so you can redirect the session from the lock screen ("deny —
+  do X instead"). Any failure (timeout, no rule match, network error, dismissed card) falls back
+  to `ask` — the normal terminal prompt — **never** to auto-allow. See
+  `hooks/permission-rules.example.json` for the rule file shape; copy it to
+  `~/.relay/permission-rules.json` to opt in (no file = the hook never intercepts, even AFK).
+- **SessionStart** / **SessionEnd** (`session-start-hook.mjs` / `session-end-hook.mjs`) → silent
+  (`deliver:false`) audit-trail rows — no push, ever. They're what the Sessions dashboard (see
+  below) folds to answer "which sessions exist right now" and to flip a session to `ended` when it
+  closes cleanly, instead of leaving it `stale` forever.
 
 Wiring is opt-in (see `hooks/SETUP.md`): project-local `relay/.claude/settings.json` scopes the
 hooks to this repo; promote to `~/.claude/settings.json` for every session everywhere. To turn
 them off, remove the `hooks` block (or delete `~/.relay/config.json` to make them inert again).
+
+## Sessions dashboard
+
+The PWA's **Sessions** button (TopBar, next to Activity) answers "which Claude sessions exist
+right now, what project, what state, and does it need me" — built entirely from data Relay already
+collects: the notify-log audit trail (pushes + the silent SessionStart/SessionEnd rows above) plus
+the dispatch runner's `claude_session` linkage. No new table; `GET /api/sessions` folds it fresh on
+every request (`src/notify-log.ts`'s `aggregateSessions`/`foldSessionRows`).
+
+Each row gets a best-effort status — `needs-input` (last event was a permission prompt or an
+approval/prompt/choice card push), `active` (something happened recently), `stale` (nothing in the
+last 30 min, session never ended), or `ended` (the SessionEnd hook fired) — sorted needs-input
+first. This is an **event-derived view, not process-level truth**: a killed terminal never reports
+`ended` unless the hook fired; that's the honest `stale` case, not a bug. A row spawned by the
+dispatch runner (Plan 02) surfaces the SAME Cancel/Follow-up actions as its `DispatchItem` in the
+feed; a `needs-input` row with a pending card deep-links straight to it ("Answer it"); anything
+else opens the Activity drawer pre-filtered to that session.
 
 ## Deploy (Railway)
 
@@ -229,6 +350,20 @@ API with no frontend.
 | POST | `/api/cards` | write | create a card (+ optional push) |
 | GET | `/api/cards` · `/api/cards/:id` | UI | feed / one card |
 | POST | `/api/cards/:id/respond` | UI | record a verdict |
-| GET | `/api/cards/:id/response?wait=N` | write | long-poll the verdict |
+| GET | `/api/cards/:id/response?wait=N&events_since=SEQ` | write | long-poll the verdict; `events_since` (opt-in) also resolves early on a new thread message — omit for the exact pre-Plan-04 behavior |
+| POST | `/api/cards/:id/events` | UI | append a thread event (role:'user') |
+| GET | `/api/cards/:id/events?since_seq=N&wait=S` | UI | list/long-poll events after seq N |
+| POST | `/api/cards/:id/agent-events` | write | append a thread event (role:'agent') |
+| GET | `/api/cards/:id/agent-events?since_seq=N&wait=S` | write | list/long-poll events after seq N |
 | GET | `/api/cards/:id/asset/:aid` | UI | image bytes |
-| GET | `/api/stream` | UI | SSE live feed |
+| GET | `/api/stream` | UI | SSE live feed (also carries `dispatch-updated`) |
+| POST | `/api/dispatches` | UI | compose a dispatch: `{title?, body, target, resume_of?}` |
+| GET | `/api/dispatches` | UI | list dispatches (`?status=&since=&limit=`) |
+| GET | `/api/dispatches/:id` | UI | one dispatch |
+| POST | `/api/dispatches/:id/cancel` | UI | cancel — only while still `queued` |
+| GET | `/api/dispatches/next?wait=N` | write | runner long-poll for its next job |
+| POST | `/api/dispatches/:id/claim` | write | atomic claim (`changes=0` → conflict) |
+| POST | `/api/dispatches/:id/status` | write | `running`\|`done`\|`failed`, legal transitions only |
+| GET | `/api/dispatch-targets` | UI | union of every runner's announced `{id,label}` targets |
+| POST | `/api/dispatch-targets` | write | a runner replaces its own target list wholesale |
+| GET | `/api/sessions?window_hours=N` | UI | Sessions dashboard rows, folded from notify-log + dispatch linkage |

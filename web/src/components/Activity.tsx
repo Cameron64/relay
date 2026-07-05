@@ -12,19 +12,21 @@ import {
   Paper,
   ScrollArea,
   Stack,
-  Switch,
   Text,
+  Switch,
   Tooltip,
 } from '@mantine/core';
-import { useDisclosure } from '@mantine/hooks';
 import { fetchNotifications } from '../api';
 import type { NotifyLogEntry, NotifySource } from '../types';
 
-// The notification audit trail. Opened from the TopBar, it lists every push Relay has sent — newest
-// first — with its origin (which session/project/host fired it, and why). This is the answer to the
-// "stray relay" problem: a "Claude is waiting for your input" push that leads nowhere can be traced
-// here to the exact session that sent it, and entries with no card behind them are flagged so the
-// dead-end tap is explained rather than mysterious.
+// The notification audit trail. Lifted to App.tsx (like Compose) so both TopBar's own "Activity"
+// button AND SessionsPanel's "otherwise, open Activity pre-filtered to this session" row action
+// (relay-roadmap Plan 03) can open the SAME drawer instance instead of each mounting their own.
+// Lists every push Relay has sent — newest first — with its origin (which session/project/host
+// fired it, and why). This is the answer to the "stray relay" problem: a "Claude is waiting for
+// your input" push that leads nowhere can be traced here to the exact session that sent it, and
+// entries with no card behind them are flagged so the dead-end tap is explained rather than
+// mysterious.
 
 const SOURCE_LABEL: Record<NotifySource, string> = {
   notification: 'idle/permission hook',
@@ -32,6 +34,8 @@ const SOURCE_LABEL: Record<NotifySource, string> = {
   cli: 'relay notify (CLI)',
   mcp: 'relay_notify (MCP)',
   card: 'card',
+  dispatch: 'dispatch failure',
+  session: 'session start/end hook',
   unknown: 'unknown',
 };
 
@@ -41,6 +45,8 @@ const SOURCE_COLOR: Record<NotifySource, string> = {
   cli: 'gray',
   mcp: 'cyan',
   card: 'grape',
+  dispatch: 'red',
+  session: 'violet',
   unknown: 'gray',
 };
 
@@ -50,6 +56,8 @@ const EVENT_COLOR: Record<string, string> = {
   idle: 'orange',
   permission: 'yellow',
   done: 'teal',
+  'session-start': 'violet',
+  'session-end': 'gray',
 };
 
 function relTime(iso: string): string {
@@ -158,8 +166,17 @@ function NotifyRow({ n }: { n: NotifyLogEntry }) {
   );
 }
 
-export function Activity() {
-  const [opened, { open, close }] = useDisclosure(false);
+export function Activity({
+  opened,
+  onClose,
+  initialSessionId = null,
+}: {
+  opened: boolean;
+  onClose: () => void;
+  // Pre-filter to one session's rows on open (SessionsPanel's "otherwise" tap action). Seeded into
+  // local state on each open (not synced back), so clearing the chip below doesn't fight the prop.
+  initialSessionId?: string | null;
+}) {
   const [state, setState] = useState<'idle' | 'loading' | 'ok' | 'warming' | 'error'>('idle');
   const [items, setItems] = useState<NotifyLogEntry[]>([]);
 
@@ -168,6 +185,7 @@ export function Activity() {
   const [hideSilenced, setHideSilenced] = useState(true);
   const [sourceSel, setSourceSel] = useState<string[]>([]); // empty = all sources
   const [eventSel, setEventSel] = useState<string[]>([]); // empty = all events
+  const [sessionFilter, setSessionFilter] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setState('loading');
@@ -182,10 +200,17 @@ export function Activity() {
     }
   }, []);
 
-  // Fetch fresh each time the drawer opens (the trail changes constantly as sessions ping).
+  // Fetch fresh each time the drawer opens (the trail changes constantly as sessions ping), and
+  // seed the session filter from the caller's initialSessionId — SessionsPanel's row action opens
+  // this ALREADY pre-filtered; the plain "Activity" button in TopBar opens it with null (no filter).
+  // Also re-seeds on a bare initialSessionId change while the drawer stays open (opened stays true):
+  // the drawer instance is shared between TopBar's button and every SessionsPanel row action, so a
+  // caller can retarget it to a different session (or clear to none) without a close/reopen cycle.
   useEffect(() => {
-    if (opened) void load();
-  }, [opened, load]);
+    if (!opened) return;
+    setSessionFilter(initialSessionId);
+    void load();
+  }, [opened, initialSessionId, load]);
 
   // Only offer chips for the sources/events actually present in this page of the trail.
   const presentSources = useMemo(() => {
@@ -204,19 +229,21 @@ export function Activity() {
   const filtered = useMemo(
     () =>
       items.filter((n) => {
+        if (sessionFilter && n.session_id !== sessionFilter) return false;
         if (hideSilenced && !n.delivered) return false;
         if (sourceSel.length && !sourceSel.includes(n.source)) return false;
         if (eventSel.length && !eventSel.includes(n.event ?? '')) return false;
         return true;
       }),
-    [items, hideSilenced, sourceSel, eventSel],
+    [items, sessionFilter, hideSilenced, sourceSel, eventSel],
   );
 
-  const atDefaults = hideSilenced && sourceSel.length === 0 && eventSel.length === 0;
+  const atDefaults = hideSilenced && sourceSel.length === 0 && eventSel.length === 0 && !sessionFilter;
   const resetFilters = useCallback(() => {
     setHideSilenced(true);
     setSourceSel([]);
     setEventSel([]);
+    setSessionFilter(null);
   }, []);
 
   const filterBar = (
@@ -228,6 +255,17 @@ export function Activity() {
       style={{ position: 'sticky', top: 0, zIndex: 2 }}
     >
       <Stack gap={8}>
+        {sessionFilter ? (
+          <Group justify="space-between" align="center" wrap="nowrap" gap="xs">
+            <Badge size="sm" variant="filled" color="indigo" style={{ fontFamily: 'monospace' }}>
+              session #{sessionFilter.slice(0, 8)}
+            </Badge>
+            <Button variant="subtle" size="compact-xs" color="gray" onClick={() => setSessionFilter(null)}>
+              Clear
+            </Button>
+          </Group>
+        ) : null}
+
         <Group justify="space-between" align="center" wrap="nowrap" gap="xs">
           <Switch
             size="xs"
@@ -285,17 +323,10 @@ export function Activity() {
   );
 
   return (
-    <>
-      <Tooltip label="Notification history" openDelay={300}>
-        <Button variant="subtle" size="xs" color="gray" onClick={open} aria-label="Notification history">
-          Activity
-        </Button>
-      </Tooltip>
-
-      <Drawer
-        opened={opened}
-        onClose={close}
-        position="right"
+    <Drawer
+      opened={opened}
+      onClose={onClose}
+      position="right"
         size="md"
         title={
           <Group gap="xs">
@@ -343,7 +374,6 @@ export function Activity() {
             )}
           </Stack>
         )}
-      </Drawer>
-    </>
+    </Drawer>
   );
 }

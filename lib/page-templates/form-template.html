@@ -1,0 +1,81 @@
+<!doctype html>
+<!--
+  Relay page template: form-template. Demonstrates the postMessage SUBMIT PROTOCOL (relay-roadmap
+  Plan 05) — use this whenever relay_page is called with expectResponse:true. Copy it, then replace
+  the TODO region with your own fields; keep the two postMessage calls exactly as shown.
+
+  Sandboxed (allow-scripts), opaque origin: no Relay/network-back, no localStorage, alert() is a
+  no-op. window.parent.postMessage(..., '*') is the ONLY door out — the parent validates the
+  message by the sender's window identity, not by origin, so '*' here is correct and safe.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Relay Page — form</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>html,body{background:#1a1b1e;color:#e9ecef}</style>
+</head>
+<body class="min-h-screen antialiased">
+  <!-- On-screen error overlay (alert() is muted in the sandbox). Registered before other scripts. -->
+  <div id="err" style="display:none;position:fixed;left:0;right:0;bottom:0;background:#5c1f1f;color:#fff;padding:8px 12px;font:13px monospace;white-space:pre-wrap;z-index:9999"></div>
+  <script>addEventListener("error",function(e){var d=document.getElementById("err");d.style.display="block";d.textContent="⚠ "+(e.message||"script error")});</script>
+
+  <!-- Tell the parent this page wants an answer, as soon as it's ready. Optional, but it swaps
+       the app's plain page chrome for a "waiting for your input" banner. -->
+  <script>window.parent.postMessage({ __relay: "ready", expectsResponse: true }, "*");</script>
+
+  <main class="max-w-md mx-auto px-4 py-8">
+    <h1 class="text-2xl font-semibold mb-1">Question</h1>
+    <p class="text-[#adb5bd] leading-relaxed mb-6">Replace this with your actual question / context.</p>
+
+    <!-- TODO: replace with your fields (sliders, radios, text inputs, drawn regions, whatever the
+         decision needs). Keep an EXPLICIT submit control — never auto-submit on every change. -->
+    <form id="f" class="space-y-4">
+      <label class="block">
+        <span class="block text-sm mb-1">A slider parameter</span>
+        <input type="range" id="param" min="0" max="100" value="50" class="w-full">
+      </label>
+      <label class="block">
+        <span class="block text-sm mb-1">Notes (optional)</span>
+        <textarea id="notes" rows="3" class="w-full rounded bg-[#25262b] border border-[#373a40] p-2 text-sm"></textarea>
+      </label>
+      <button type="submit" id="go" class="w-full rounded bg-indigo-500 hover:bg-indigo-400 text-white py-2 font-medium">
+        Submit
+      </button>
+    </form>
+    <!-- end TODO -->
+
+    <p id="sent" class="mt-4 text-sm text-emerald-400" style="display:none">Sent ✓ — you can close this.</p>
+  </main>
+
+  <script>
+    var form = document.getElementById("f");
+    var btn = document.getElementById("go");
+    var sent = document.getElementById("sent");
+    var submitted = false; // belt-and-suspenders — the PARENT also only accepts the first submit
+
+    form.addEventListener("submit", function (e) {
+      e.preventDefault();
+      if (submitted) return;
+      submitted = true;
+
+      // Build your payload — any JSON-serializable object, <= 64KB.
+      var payload = {
+        param: Number(document.getElementById("param").value),
+        notes: document.getElementById("notes").value,
+      };
+
+      // THE ONE REQUIRED CALL. Do this exactly once.
+      window.parent.postMessage({ __relay: "submit", payload: payload }, "*");
+
+      // Show a disabled/sent state locally — the parent does NOT tell you it accepted the submit.
+      btn.disabled = true;
+      btn.textContent = "Sent";
+      btn.className = btn.className.replace("bg-indigo-500 hover:bg-indigo-400", "bg-[#373a40]");
+      form.querySelectorAll("input,textarea").forEach(function (el) { el.disabled = true; });
+      sent.style.display = "block";
+    });
+  </script>
+</body>
+</html>

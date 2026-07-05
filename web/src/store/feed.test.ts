@@ -1,9 +1,32 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { useFeed } from './feed';
-import type { Card } from '../types';
+import type { Card, CardEvent, Dispatch } from '../types';
+
+function event(cardId: string, seq: number, extra: Partial<CardEvent> = {}): CardEvent {
+  return { card_id: cardId, seq, role: 'agent', type: 'message', body: 'm' + seq, at: 't' + seq, ...extra };
+}
 
 function card(id: string, created_at: string, extra: Partial<Card> = {}): Card {
   return { id, title: 't' + id, kind: 'note', status: 'pending', created_at, ...extra };
+}
+
+function dispatch(id: string, created_at: string, extra: Partial<Dispatch> = {}): Dispatch {
+  return {
+    id,
+    created_at,
+    title: 't' + id,
+    body: 'body',
+    target: 'notes',
+    status: 'queued',
+    runner_host: null,
+    claimed_at: null,
+    finished_at: null,
+    resume_of: null,
+    claude_session: null,
+    result_summary: null,
+    result_card_id: null,
+    ...extra,
+  };
 }
 
 describe('feed store', () => {
@@ -50,5 +73,115 @@ describe('feed store', () => {
     useFeed.getState().remove('a');
     expect(useFeed.getState().cards.map((c) => c.id)).toEqual(['b']);
     expect(useFeed.getState().flashIds.has('a')).toBe(false);
+  });
+
+  // Plan 02 acceptance: "Feed store test: dispatch slice upsert via SSE event" — upsertDispatch is
+  // the exact handler useSSE.ts wires to the 'dispatch-updated' event.
+  describe('dispatch slice', () => {
+    it('keeps dispatches newest-first, independent of the cards list', () => {
+      useFeed.getState().upsert(card('c1', '2026-06-14T09:00:00Z'));
+      useFeed.getState().upsertDispatch(dispatch('a', '2026-06-14T10:00:00Z'));
+      useFeed.getState().upsertDispatch(dispatch('b', '2026-06-14T11:00:00Z'));
+      expect(useFeed.getState().dispatches.map((d) => d.id)).toEqual(['b', 'a']);
+      expect(useFeed.getState().cards.map((c) => c.id)).toEqual(['c1']);
+    });
+
+    it('replaces by id without duplicating (e.g. queued -> claimed -> running -> done)', () => {
+      useFeed.getState().upsertDispatch(dispatch('a', '2026-06-14T10:00:00Z', { status: 'queued' }));
+      useFeed.getState().upsertDispatch(dispatch('a', '2026-06-14T10:00:00Z', { status: 'claimed', runner_host: 'cam-desktop' }));
+      useFeed.getState().upsertDispatch(dispatch('a', '2026-06-14T10:00:00Z', { status: 'done', result_summary: 'did the thing' }));
+      expect(useFeed.getState().dispatches).toHaveLength(1);
+      expect(useFeed.getState().dispatches[0].status).toBe('done');
+      expect(useFeed.getState().dispatches[0].result_summary).toBe('did the thing');
+    });
+
+    it('tracks newestDispatchCursor as the max created_at', () => {
+      useFeed.getState().upsertDispatch(dispatch('a', '2026-06-14T10:00:00Z'));
+      useFeed.getState().upsertDispatch(dispatch('b', '2026-06-14T11:00:00Z'));
+      expect(useFeed.getState().newestDispatchCursor).toBe('2026-06-14T11:00:00Z');
+    });
+
+    it('clear() resets both the card and dispatch slices', () => {
+      useFeed.getState().upsert(card('c1', '2026-06-14T09:00:00Z'));
+      useFeed.getState().upsertDispatch(dispatch('a', '2026-06-14T10:00:00Z'));
+      useFeed.getState().clear();
+      expect(useFeed.getState().cards).toHaveLength(0);
+      expect(useFeed.getState().dispatches).toHaveLength(0);
+      expect(useFeed.getState().newestDispatchCursor).toBeNull();
+    });
+  });
+
+  // relay-roadmap Plan 04 — card threads: events are a SEPARATE keyed slice (never embedded on
+  // the Card object), populated lazily by Thread.tsx and kept live via the SSE 'card-event'
+  // broadcast (see useSSE.ts's onCardEvent -> appendEvent wiring).
+  describe('events slice (Plan 04)', () => {
+    it('setEvents replaces a card thread, sorted ascending by seq', () => {
+      useFeed.getState().setEvents('c1', [event('c1', 2), event('c1', 1)]);
+      expect(useFeed.getState().events.c1.map((e) => e.seq)).toEqual([1, 2]);
+    });
+
+    it('appendEvent merges a new event into an existing thread', () => {
+      useFeed.getState().setEvents('c1', [event('c1', 1)]);
+      useFeed.getState().appendEvent('c1', event('c1', 2));
+      expect(useFeed.getState().events.c1.map((e) => e.seq)).toEqual([1, 2]);
+    });
+
+    it('appendEvent de-dupes by seq (the composer\'s own post + the SSE echo landing for the same event)', () => {
+      useFeed.getState().setEvents('c1', [event('c1', 1)]);
+      useFeed.getState().appendEvent('c1', event('c1', 2, { body: 'first' }));
+      useFeed.getState().appendEvent('c1', event('c1', 2, { body: 'duplicate echo' })); // same seq, ignored
+      expect(useFeed.getState().events.c1).toHaveLength(2);
+      expect(useFeed.getState().events.c1[1].body).toBe('first');
+    });
+
+    it('appendEvent initializes an unloaded card thread rather than dropping the message', () => {
+      expect(useFeed.getState().events.c2).toBeUndefined();
+      useFeed.getState().appendEvent('c2', event('c2', 1));
+      expect(useFeed.getState().events.c2.map((e) => e.seq)).toEqual([1]);
+    });
+
+    it('other cards\' threads are untouched', () => {
+      useFeed.getState().setEvents('c1', [event('c1', 1)]);
+      useFeed.getState().appendEvent('c2', event('c2', 1));
+      expect(useFeed.getState().events.c1).toHaveLength(1);
+      expect(useFeed.getState().events.c2).toHaveLength(1);
+    });
+
+    it('clear() resets the events slice too', () => {
+      useFeed.getState().setEvents('c1', [event('c1', 1)]);
+      useFeed.getState().clear();
+      expect(useFeed.getState().events).toEqual({});
+    });
+
+    // Review fix: distinguish "fully hydrated via a real fetchCardEvents()" from "has some
+    // entries" — appendEvent alone must never make Thread.tsx skip its one-time full fetch.
+    describe('loadedEventCardIds (review fix)', () => {
+      it('setEvents marks the card as fully loaded', () => {
+        expect(useFeed.getState().loadedEventCardIds.has('c1')).toBe(false);
+        useFeed.getState().setEvents('c1', [event('c1', 1)]);
+        expect(useFeed.getState().loadedEventCardIds.has('c1')).toBe(true);
+      });
+
+      it('appendEvent alone does NOT mark the card as fully loaded', () => {
+        useFeed.getState().appendEvent('c1', event('c1', 1));
+        expect(useFeed.getState().events.c1).toHaveLength(1); // visible immediately
+        expect(useFeed.getState().loadedEventCardIds.has('c1')).toBe(false); // but not "hydrated"
+      });
+
+      it('clear() resets loadedEventCardIds too', () => {
+        useFeed.getState().setEvents('c1', [event('c1', 1)]);
+        useFeed.getState().clear();
+        expect(useFeed.getState().loadedEventCardIds.has('c1')).toBe(false);
+      });
+
+      // Review fix: setEvents (a completed fetchCardEvents()) must MERGE with, not clobber, an
+      // event that arrived via appendEvent (an SSE 'card-event' broadcast) while that fetch was
+      // still in flight — otherwise the concurrently-arrived event is silently dropped.
+      it('setEvents merges with events already appended live during the fetch, instead of dropping them', () => {
+        useFeed.getState().appendEvent('c1', event('c1', 2)); // arrives via SSE mid-fetch
+        useFeed.getState().setEvents('c1', [event('c1', 1)]); // the fetch's own (now-stale) snapshot
+        expect(useFeed.getState().events.c1.map((e) => e.seq)).toEqual([1, 2]);
+      });
+    });
   });
 });

@@ -52,6 +52,12 @@ export type Card = {
   copy_text: string | null;
   mermaid: string | null;
   page_html: string | null;
+  // Plan 05 (page-submit bridge): when true, this card is treated like an approval for expiry
+  // purposes (no default TTL while pending — a question shouldn't vanish before it's answered)
+  // and its push is flagged response-soliciting (routes-cards.ts). Set at create time only; the
+  // PWA's runtime 'ready'/expectsResponse handshake is a SEPARATE, purely client-side signal for
+  // the "waiting for your input" banner and does not write back to this column.
+  expects_response: boolean;
   source: Record<string, unknown> | null;
   status: 'pending' | 'responded' | 'dismissed';
   response: CardResponse | null;
@@ -60,7 +66,41 @@ export type Card = {
   expires_at: string | null;
   push_sent: boolean;
   assets: { id: string; mime: string }[];
+  // Cheap COUNT(*) of this card's card_events, attached ONLY by getCard (single-card fetch) —
+  // NEVER by listCards, so the feed payload doesn't pay for a join/subquery per card just to
+  // show a thread badge nobody asked for yet (see Plan 00's "Gotchas").
+  event_count?: number;
 };
+
+// card_events — an append-only, ordered channel attached to a card, richer than the frozen
+// single-verdict `response` (respond/wait stays exactly as-is; see the master roadmap doc §4).
+// 'message' events are thread text (Plan 04); 'payload' events are structured JSON (Plan 05's
+// page-submit bridge). role:'agent' rows come from the write-token side (CLI/MCP/hooks/runner);
+// role:'user' rows come from the browser. Both share this one shape so a listener never needs to
+// know which side wrote a given event.
+export type CardEventRole = 'agent' | 'user';
+export type CardEventType = 'message' | 'payload';
+
+export type CardEvent = {
+  card_id: string;
+  seq: number;
+  role: CardEventRole;
+  type: CardEventType;
+  body: string;
+  at: string;
+};
+
+// The part of a CardEvent the caller supplies; seq/at are always server-assigned.
+export type CardEventInput = {
+  role: CardEventRole;
+  type: CardEventType;
+  body: string;
+};
+
+// Caps mirror the page_html cap above: keep a single event, and a whole card's event thread, from
+// bloating the SQLite row / the SSE `card-event` broadcast.
+export const CARD_EVENT_BODY_MAX = { message: 16 * 1024, payload: 64 * 1024 } as const;
+export const CARD_EVENT_MAX_PER_CARD = 200;
 
 export type CardInput = {
   kind: string;
@@ -71,6 +111,9 @@ export type CardInput = {
   copy_text: string | null;
   mermaid: string | null;
   page_html: string | null;
+  // Optional; defaults to false when omitted (existing callers/tests that build a CardInput
+  // literal without this field are unaffected — see createCard's `?? false`).
+  expects_response?: boolean;
   source: Record<string, unknown> | null;
   priority: 'normal' | 'high';
   expires_at: string | null;
@@ -104,8 +147,12 @@ const CARD_TTL_HOURS = Number(process.env.CARD_TTL_HOURS ?? 24);
 const CARD_ANSWERED_TTL_HOURS = Number(process.env.CARD_ANSWERED_TTL_HOURS ?? 6);
 const NO_DEFAULT_EXPIRY_KINDS = new Set(['approval', 'choice', 'prompt']);
 
-function defaultExpiryFor(kind: string, createdAtIso: string): string | null {
-  if (NO_DEFAULT_EXPIRY_KINDS.has(kind)) return null;
+// expectsResponse (Plan 05) is the same "no default expiry while pending" treatment as the kinds
+// above, applied per-card rather than per-kind — a plain `page` still gets the 24h TTL bucket, but
+// a page created with expects_response:true (a question, not a view-only viz) waits for its answer
+// exactly like an approval/choice/prompt.
+function defaultExpiryFor(kind: string, createdAtIso: string, expectsResponse = false): string | null {
+  if (NO_DEFAULT_EXPIRY_KINDS.has(kind) || expectsResponse) return null;
   if (!(CARD_TTL_HOURS > 0)) return null;
   return new Date(Date.parse(createdAtIso) + CARD_TTL_HOURS * 3_600_000).toISOString();
 }
@@ -132,6 +179,7 @@ export function ensureCardsSchema(): void {
         copy_text    TEXT,
         mermaid      TEXT,
         page_html    TEXT,
+        expects_response INTEGER NOT NULL DEFAULT 0,
         source       TEXT,
         status       TEXT NOT NULL DEFAULT 'pending',
         response     TEXT,
@@ -149,6 +197,15 @@ export function ensureCardsSchema(): void {
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
       CREATE INDEX IF NOT EXISTS idx_assets_card ON card_assets(card_id);
+      CREATE TABLE IF NOT EXISTS card_events (
+        card_id  TEXT NOT NULL,
+        seq      INTEGER NOT NULL,
+        role     TEXT NOT NULL,
+        type     TEXT NOT NULL,
+        body     TEXT NOT NULL,
+        at       TEXT NOT NULL,
+        PRIMARY KEY (card_id, seq)
+      );
     `);
     // Migration: `options` was added after the table shipped. CREATE TABLE IF NOT EXISTS won't add
     // it to an existing prod DB, so add it idempotently (SQLite allows ADD COLUMN with NOT NULL when
@@ -161,6 +218,12 @@ export function ensureCardsSchema(): void {
     // existing rows backfill to NULL — safe on the live prod volume (no DEFAULT needed).
     if (!cols.some((c) => c.name === 'page_html')) {
       db.exec('ALTER TABLE cards ADD COLUMN page_html TEXT');
+    }
+    // Migration: `expects_response` (Plan 05's page-submit bridge) was added after the table
+    // shipped. NOT NULL with a DEFAULT backfills existing rows to 0 (unaffected — expiry/push
+    // behavior is only conditioned on this column being explicitly true).
+    if (!cols.some((c) => c.name === 'expects_response')) {
+      db.exec('ALTER TABLE cards ADD COLUMN expects_response INTEGER NOT NULL DEFAULT 0');
     }
     _ready = true;
   } catch (err) {
@@ -277,10 +340,31 @@ export function validateCardInput(body: unknown): Ok<CardInput> | Err {
   }
   const source = b.source && typeof b.source === 'object' ? (b.source as Record<string, unknown>) : null;
   const expires_at = typeof b.expires_at === 'string' ? b.expires_at : null;
+  // expects_response: a plain boolean flag (Plan 05). Not restricted to kind:'page' — the effect
+  // (no default expiry while pending + response-soliciting push) is harmless on any kind, and
+  // scoping it here would just be one more branch to keep in sync with VALID_KINDS.
+  const expects_response = b.expects_response === true;
   return {
     ok: true,
-    value: { kind, title, body: bodyText, buttons: bv.value, options: ov.value, copy_text, mermaid, page_html, source, priority, expires_at },
+    value: { kind, title, body: bodyText, buttons: bv.value, options: ov.value, copy_text, mermaid, page_html, expects_response, source, priority, expires_at },
   };
+}
+
+// --- card_events validation (exported for unit tests) ----------------------
+// Only `type`/`body` come from the request body — `role` is decided by the ROUTE (which auth
+// header matched: write -> 'agent', UI cookie -> 'agent-events' vs 'events' path), never trusted
+// from client input. See routes-cards.ts's two-path split (master doc §6: never merge the auth
+// middlewares).
+export function validateCardEventInput(body: unknown): Ok<{ type: CardEventType; body: string }> | Err {
+  if (typeof body !== 'object' || body === null) return { ok: false, error: 'body must be an object' };
+  const b = body as Record<string, unknown>;
+  const type = b.type === undefined ? 'message' : b.type;
+  if (type !== 'message' && type !== 'payload') return { ok: false, error: 'type must be "message" or "payload"' };
+  const text = typeof b.body === 'string' ? b.body : null;
+  if (!text) return { ok: false, error: 'body required' };
+  const max = CARD_EVENT_BODY_MAX[type];
+  if (text.length > max) return { ok: false, error: `event body exceeds ${max} bytes for type "${type}"` };
+  return { ok: true, value: { type, body: text } };
 }
 
 // --- CRUD ------------------------------------------------------------------
@@ -298,6 +382,7 @@ function hydrate(row: any): Card {
     copy_text: row.copy_text,
     mermaid: row.mermaid,
     page_html: row.page_html ?? null,
+    expects_response: !!row.expects_response,
     source: safeJSON<Record<string, unknown> | null>(row.source, null),
     status: row.status,
     response: safeJSON<CardResponse | null>(row.response, null),
@@ -313,9 +398,10 @@ export function createCard(value: CardInput, assets: { mime: string; bytes: Uint
   const id = genId();
   const now = new Date().toISOString();
   const tx = db.transaction(() => {
+    const expectsResponse = value.expects_response ?? false;
     db.query(
-      `INSERT INTO cards (id, created_at, kind, title, body, buttons, options, copy_text, mermaid, page_html, source, status, priority, expires_at, push_sent)
-       VALUES ($id, $created, $kind, $title, $body, $buttons, $options, $copy, $mermaid, $page_html, $source, 'pending', $priority, $expires, 0)`,
+      `INSERT INTO cards (id, created_at, kind, title, body, buttons, options, copy_text, mermaid, page_html, expects_response, source, status, priority, expires_at, push_sent)
+       VALUES ($id, $created, $kind, $title, $body, $buttons, $options, $copy, $mermaid, $page_html, $expects_response, $source, 'pending', $priority, $expires, 0)`,
     ).run({
       $id: id,
       $created: now,
@@ -327,9 +413,10 @@ export function createCard(value: CardInput, assets: { mime: string; bytes: Uint
       $copy: value.copy_text ?? null,
       $mermaid: value.mermaid ?? null,
       $page_html: value.page_html ?? null,
+      $expects_response: expectsResponse ? 1 : 0,
       $source: value.source ? JSON.stringify(value.source) : null,
       $priority: value.priority || 'normal',
-      $expires: value.expires_at ?? defaultExpiryFor(value.kind, now),
+      $expires: value.expires_at ?? defaultExpiryFor(value.kind, now, expectsResponse),
     });
     for (const a of assets) {
       db.query('INSERT INTO card_assets (id, card_id, mime, bytes, created_at) VALUES ($id, $cid, $mime, $bytes, $created)').run({
@@ -348,7 +435,10 @@ export function createCard(value: CardInput, assets: { mime: string; bytes: Uint
 export function getCard(id: string): Card | null {
   const row = db.query('SELECT * FROM cards WHERE id = $id').get({ $id: id }) as any;
   if (!row) return null;
-  return hydrate(row);
+  const card = hydrate(row);
+  const countRow = db.query('SELECT COUNT(*) AS n FROM card_events WHERE card_id = $id').get({ $id: id }) as { n: number };
+  card.event_count = countRow.n;
+  return card;
 }
 
 export function listCards(opts: { since?: string; limit?: number } = {}): Card[] {
@@ -367,12 +457,24 @@ export function listCards(opts: { since?: string; limit?: number } = {}): Card[]
 }
 
 export type RespondResult =
-  | { status: 'responded'; response: CardResponse }
+  | { status: 'responded'; response: CardResponse; event?: CardEvent }
   | { status: 'conflict'; response: CardResponse | null }
   | { status: 'reserved' }
-  | { status: 'notfound' };
+  | { status: 'notfound' }
+  | { status: 'payload_cap' };
 
-export function respondCard(id: string, input: { action: string; note?: string | null }): RespondResult {
+// `payload`, when provided, is a pre-validated (size-checked by the caller, via
+// validateCardEventInput) JSON string to record as a 'payload' card_event IN THE SAME
+// TRANSACTION as the responded-status flip (Plan 05's page-submit bridge). This is the fix for
+// the cross-tab/cross-client race: two clients racing to submit the same page card could
+// previously each write their own 'payload' event via the separate events endpoint BEFORE either
+// respond() call landed, so the highest-seq payload row picked up by relay-mcp's withPagePayload
+// was not necessarily the one that belonged to the respond() call that actually won. Folding the
+// payload write into respondCard's own transaction means only the WINNING call — the one that
+// actually flips status from 'pending' to 'responded' — ever inserts a payload event; a losing
+// call sees `status === 'responded'` already and returns 'conflict' without touching card_events
+// at all, exactly mirroring the semantics of a losing respond(). See PageFrame.tsx's submitPayload.
+export function respondCard(id: string, input: { action: string; note?: string | null; payload?: string }): RespondResult {
   // Reserved-namespace guard: action ids starting with '__' are internal sentinels — notably the
   // notification "Reply" button (prompt cards) posts '__reply' from an OUT-OF-DATE service worker
   // that predates this feature. They must never be recorded as a verdict. Rejecting here also makes
@@ -383,6 +485,12 @@ export function respondCard(id: string, input: { action: string; note?: string |
     const row = db.query('SELECT status, response, buttons FROM cards WHERE id = $id').get({ $id: id }) as any;
     if (!row) return { status: 'notfound' };
     if (row.status === 'responded') return { status: 'conflict', response: safeJSON<CardResponse | null>(row.response, null) };
+    // Per-card event cap, checked BEFORE the status flip so a losing/edge-case cap hit never
+    // leaves the card responded with no payload recorded (all-or-nothing, same transaction).
+    if (input.payload !== undefined) {
+      const countRow = db.query('SELECT COUNT(*) AS n FROM card_events WHERE card_id = $cid').get({ $cid: id }) as { n: number };
+      if (countRow.n >= CARD_EVENT_MAX_PER_CARD) return { status: 'payload_cap' };
+    }
     const buttons = safeJSON<Button[]>(row.buttons, []);
     const btn = buttons.find((b) => b.id === input.action);
     const verdict = btn?.verdict ?? input.action;
@@ -404,9 +512,64 @@ export function respondCard(id: string, input: { action: string; note?: string |
         $id: id,
       });
     }
-    return { status: 'responded', response };
+    let event: CardEvent | undefined;
+    if (input.payload !== undefined) {
+      const seqRow = db.query('SELECT COALESCE(MAX(seq), 0) AS m FROM card_events WHERE card_id = $cid').get({ $cid: id }) as { m: number };
+      const seq = seqRow.m + 1;
+      db.query('INSERT INTO card_events (card_id, seq, role, type, body, at) VALUES ($cid, $seq, $role, $type, $body, $at)').run({
+        $cid: id,
+        $seq: seq,
+        $role: 'user',
+        $type: 'payload',
+        $body: input.payload,
+        $at: response.at,
+      });
+      event = { card_id: id, seq, role: 'user', type: 'payload', body: input.payload, at: response.at };
+    }
+    return { status: 'responded', response, event };
   });
   return tx();
+}
+
+// Append one event to a card's thread. Transaction so the existence/status check, the per-card cap
+// count, and the seq computation ("next free slot") can't race a concurrent append onto the same
+// card. role:'user' appends are gated to pending cards (mirrors the intent of respondCard: once the
+// human has moved on, a UI-side event shouldn't reopen the thread); role:'agent' appends are allowed
+// on any status ("got it, thanks" after the human already answered is fine).
+export function appendCardEvent(cardId: string, input: CardEventInput): Ok<CardEvent> | Err {
+  const max = CARD_EVENT_BODY_MAX[input.type];
+  if (input.body.length > max) return { ok: false, error: `event body exceeds ${max} bytes for type "${input.type}"` };
+  const tx = db.transaction((): Ok<CardEvent> | Err => {
+    const row = db.query('SELECT status FROM cards WHERE id = $id').get({ $id: cardId }) as any;
+    if (!row) return { ok: false, error: 'card not found' };
+    if (input.role === 'user' && row.status !== 'pending') return { ok: false, error: 'card is not pending' };
+    const countRow = db.query('SELECT COUNT(*) AS n FROM card_events WHERE card_id = $cid').get({ $cid: cardId }) as { n: number };
+    if (countRow.n >= CARD_EVENT_MAX_PER_CARD) return { ok: false, error: `card has reached the max of ${CARD_EVENT_MAX_PER_CARD} events` };
+    const seqRow = db.query('SELECT COALESCE(MAX(seq), 0) AS m FROM card_events WHERE card_id = $cid').get({ $cid: cardId }) as { m: number };
+    const seq = seqRow.m + 1;
+    const at = new Date().toISOString();
+    db.query('INSERT INTO card_events (card_id, seq, role, type, body, at) VALUES ($cid, $seq, $role, $type, $body, $at)').run({
+      $cid: cardId,
+      $seq: seq,
+      $role: input.role,
+      $type: input.type,
+      $body: input.body,
+      $at: at,
+    });
+    return { ok: true, value: { card_id: cardId, seq, role: input.role, type: input.type, body: input.body, at } };
+  });
+  return tx();
+}
+
+export function listCardEvents(cardId: string, opts: { sinceSeq?: number } = {}): CardEvent[] {
+  const rows = opts.sinceSeq
+    ? (db
+        .query('SELECT card_id, seq, role, type, body, at FROM card_events WHERE card_id = $cid AND seq > $since ORDER BY seq ASC')
+        .all({ $cid: cardId, $since: opts.sinceSeq }) as CardEvent[])
+    : (db
+        .query('SELECT card_id, seq, role, type, body, at FROM card_events WHERE card_id = $cid ORDER BY seq ASC')
+        .all({ $cid: cardId }) as CardEvent[]);
+  return rows;
 }
 
 export function getAsset(cardId: string, assetId: string): { mime: string; bytes: Uint8Array } | null {
@@ -442,6 +605,7 @@ export function sweepExpired(): string[] {
     const tx = db.transaction(() => {
       db.query('DELETE FROM cards WHERE expires_at IS NOT NULL AND expires_at <= $now').run({ $now: now });
       db.query('DELETE FROM card_assets WHERE card_id NOT IN (SELECT id FROM cards)').run();
+      db.query('DELETE FROM card_events WHERE card_id NOT IN (SELECT id FROM cards)').run();
     });
     tx();
   }
@@ -457,11 +621,12 @@ export function pruneCards(): void {
       'DELETE FROM cards WHERE id NOT IN (SELECT id FROM cards ORDER BY created_at DESC, id DESC LIMIT $max)',
     ).run({ $max: max });
     db.query('DELETE FROM card_assets WHERE card_id NOT IN (SELECT id FROM cards)').run();
+    db.query('DELETE FROM card_events WHERE card_id NOT IN (SELECT id FROM cards)').run();
   });
   tx();
 }
 
-/** Test-only: wipe both tables. Guarded so it can't run against a real volume by accident. */
+/** Test-only: wipe all cards tables. Guarded so it can't run against a real volume by accident. */
 export function __resetForTests(): void {
-  db.exec('DELETE FROM card_assets; DELETE FROM cards;');
+  db.exec('DELETE FROM card_assets; DELETE FROM card_events; DELETE FROM cards;');
 }

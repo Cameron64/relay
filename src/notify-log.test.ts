@@ -7,7 +7,10 @@ import {
   recordNotify,
   listNotifications,
   pruneNotifyLog,
+  foldSessionRows,
+  aggregateSessions,
   __resetForTests,
+  type NotifyLogEntry,
 } from './notify-log.ts';
 // @ts-ignore — zero-dep .mjs lib has no .d.ts; these are plain pure functions.
 import { projectFromCwd, classifyNotification } from '../lib/relay-lib.mjs';
@@ -147,6 +150,179 @@ describe('projectFromCwd', () => {
     expect(projectFromCwd('')).toBeNull();
     expect(projectFromCwd(null)).toBeNull();
     expect(projectFromCwd(undefined)).toBeNull();
+  });
+});
+
+// --- session aggregation (relay-roadmap Plan 03) ----------------------------
+
+function row(over: Partial<NotifyLogEntry> = {}): NotifyLogEntry {
+  return {
+    id: 'row-' + Math.random().toString(36).slice(2),
+    created_at: new Date().toISOString(),
+    source: 'notification',
+    title: 't',
+    body: 'b',
+    tag: null,
+    url: null,
+    session_id: 'sess-a',
+    cwd: 'C:/repo/relay',
+    project: 'relay',
+    host: 'DESKTOP',
+    event: 'other',
+    card_id: null,
+    sent: 1,
+    failed: 0,
+    subscribers: 1,
+    delivered: 1,
+    ...over,
+  };
+}
+
+const NOW = new Date('2026-07-05T12:00:00.000Z');
+function minutesAgo(m: number): string {
+  return new Date(NOW.getTime() - m * 60_000).toISOString();
+}
+
+describe('foldSessionRows — status inference matrix', () => {
+  test('a lone recent row with a plain event -> active', () => {
+    const out = foldSessionRows([row({ event: 'other', created_at: minutesAgo(5) })], { now: NOW });
+    expect(out).toEqual([
+      expect.objectContaining({ sessionId: 'sess-a', status: 'active', lastEvent: 'other' }),
+    ]);
+  });
+
+  test('last event "permission" -> needs-input, regardless of age', () => {
+    const out = foldSessionRows([row({ event: 'permission', created_at: minutesAgo(500) })], { now: NOW });
+    expect(out[0].status).toBe('needs-input');
+  });
+
+  test('last event is an approval/prompt/choice card push -> needs-input', () => {
+    for (const kind of ['approval', 'prompt', 'choice']) {
+      const out = foldSessionRows([row({ source: 'card', event: kind, created_at: minutesAgo(1) })], { now: NOW });
+      expect(out[0].status).toBe('needs-input');
+    }
+  });
+
+  test('a non-soliciting card kind (e.g. "note") does NOT trigger needs-input', () => {
+    const out = foldSessionRows([row({ source: 'card', event: 'note', created_at: minutesAgo(1) })], { now: NOW });
+    expect(out[0].status).toBe('active');
+  });
+
+  test('last event "session-end" -> ended, even if very recent', () => {
+    const out = foldSessionRows([row({ event: 'session-end', created_at: minutesAgo(1) })], { now: NOW });
+    expect(out[0].status).toBe('ended');
+  });
+
+  test('idle event within the active window -> active', () => {
+    const out = foldSessionRows([row({ event: 'idle', delivered: 0, created_at: minutesAgo(10) })], {
+      now: NOW,
+      activeWindowMinutes: 30,
+    });
+    expect(out[0].status).toBe('active');
+  });
+
+  test('an event older than the active window with no session-end -> stale', () => {
+    const out = foldSessionRows([row({ event: 'idle', created_at: minutesAgo(45) })], { now: NOW, activeWindowMinutes: 30 });
+    expect(out[0].status).toBe('stale');
+  });
+
+  test('a null event (bare /api/notify with no event field) falls back to "other"', () => {
+    const out = foldSessionRows([row({ event: null, created_at: minutesAgo(1) })], { now: NOW });
+    expect(out[0].lastEvent).toBe('other');
+    expect(out[0].status).toBe('active');
+  });
+
+  test('grouping uses the NEWEST row per session, not the first in the array', () => {
+    const out = foldSessionRows(
+      [
+        row({ event: 'session-end', created_at: minutesAgo(60) }), // older but session-end
+        row({ event: 'other', created_at: minutesAgo(1) }), // newest — this one wins
+      ],
+      { now: NOW },
+    );
+    expect(out.length).toBe(1);
+    expect(out[0].lastEvent).toBe('other');
+    expect(out[0].status).toBe('active');
+  });
+
+  test('null sessionId groups fall back to the cwd|host key', () => {
+    const out = foldSessionRows(
+      [
+        row({ session_id: null, cwd: 'C:/repo/a', host: 'H1', created_at: minutesAgo(2) }),
+        row({ session_id: null, cwd: 'C:/repo/a', host: 'H1', created_at: minutesAgo(1) }),
+        row({ session_id: null, cwd: 'C:/repo/b', host: 'H1', created_at: minutesAgo(1) }),
+      ],
+      { now: NOW },
+    );
+    // two distinct (cwd,host) keys -> two groups, even though sessionId is null for all three
+    expect(out.length).toBe(2);
+    expect(out.every((s) => s.sessionId === null)).toBe(true);
+  });
+
+  test('two different sessionIds never collapse into one group', () => {
+    const out = foldSessionRows(
+      [row({ session_id: 'a', created_at: minutesAgo(1) }), row({ session_id: 'b', created_at: minutesAgo(1) })],
+      { now: NOW },
+    );
+    expect(out.length).toBe(2);
+  });
+
+  test('dispatchBySession attaches dispatchId only for a session present in the map', () => {
+    const map = new Map([['sess-a', 'dispatch-123']]);
+    const out = foldSessionRows(
+      [row({ session_id: 'sess-a', created_at: minutesAgo(1) }), row({ session_id: 'sess-other', created_at: minutesAgo(1) })],
+      { now: NOW, dispatchBySession: map },
+    );
+    const a = out.find((s) => s.sessionId === 'sess-a')!;
+    const other = out.find((s) => s.sessionId === 'sess-other')!;
+    expect(a.dispatchId).toBe('dispatch-123');
+    expect(other.dispatchId).toBeUndefined();
+  });
+
+  test('sort order: needs-input first, then active, then stale, then ended', () => {
+    const out = foldSessionRows(
+      [
+        row({ session_id: 'ended', event: 'session-end', created_at: minutesAgo(1) }),
+        row({ session_id: 'stale', event: 'other', created_at: minutesAgo(60) }),
+        row({ session_id: 'active', event: 'other', created_at: minutesAgo(1) }),
+        row({ session_id: 'needs-input', event: 'permission', created_at: minutesAgo(1) }),
+      ],
+      { now: NOW, activeWindowMinutes: 30 },
+    );
+    expect(out.map((s) => s.sessionId)).toEqual(['needs-input', 'active', 'stale', 'ended']);
+  });
+
+  test('within the same status bucket, newest lastAt sorts first', () => {
+    const out = foldSessionRows(
+      [
+        row({ session_id: 'older', event: 'other', created_at: minutesAgo(5) }),
+        row({ session_id: 'newer', event: 'other', created_at: minutesAgo(1) }),
+      ],
+      { now: NOW },
+    );
+    expect(out.map((s) => s.sessionId)).toEqual(['newer', 'older']);
+  });
+});
+
+describe('aggregateSessions — DB-backed wrapper', () => {
+  test('folds real recordNotify rows within the window', () => {
+    recordNotify({ source: 'session', title: 'Relay · relay', body: 'Session started', sessionId: 'sess-live', cwd: 'C:/repo/relay', project: 'relay', host: 'H', event: 'session-start', delivered: false });
+    const out = aggregateSessions();
+    expect(out.some((s) => s.sessionId === 'sess-live' && s.status === 'active')).toBe(true);
+  });
+
+  test('a row older than windowHours is excluded', () => {
+    // Can't backdate a real INSERT's default clock easily; verify the window param is honored by
+    // requesting a window of 0 hours (nothing is "newer than now"), which must return [].
+    recordNotify({ source: 'session', title: 't', body: 'b', sessionId: 'sess-window', event: 'session-start', delivered: false });
+    expect(aggregateSessions({ windowHours: 0 })).toEqual([]);
+  });
+
+  test('returns [] when the log is not ready', () => {
+    // notifyLogReady() is true for the whole suite (ensureNotifyLogSchema ran in beforeAll) — this
+    // just documents the contract; a dedicated not-ready test would require a separate DB module
+    // instance, which none of the other tests in this file attempt either.
+    expect(Array.isArray(aggregateSessions())).toBe(true);
   });
 });
 

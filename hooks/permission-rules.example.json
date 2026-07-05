@@ -1,0 +1,12 @@
+{
+  "_comment": "Copy this file to ~/.relay/permission-rules.json to opt in. Real JSON has no comment syntax, so this _comment key documents the shape instead — it is ignored by the loader (only the `rules` array is read). No file at ~/.relay/permission-rules.json means the pretool-hook NEVER intercepts, even when AFK is on.",
+  "_fields": {
+    "tool": "Exact Claude Code tool name (Bash, Write, Edit, ...).",
+    "inputMatch": "Optional regex tested against JSON.stringify(tool_input). Always matched case-insensitively. Omit it to match every call of that tool."
+  },
+  "rules": [
+    { "tool": "Bash", "inputMatch": "(?i)(rm -rf|git push|railway up|npm publish)" },
+    { "tool": "Write" },
+    { "tool": "Edit" }
+  ]
+}

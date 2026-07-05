@@ -1,0 +1,19 @@
+{
+  "host": "my-desktop",
+  "concurrency": 1,
+  "targets": [
+    {
+      "id": "personal",
+      "label": "personal repos",
+      "cwd": "C:/Users/you/source/repos/personal",
+      "permissionMode": "acceptEdits"
+    },
+    {
+      "id": "notes",
+      "label": "brainstorm triage",
+      "cwd": "C:/Users/you/source/repos/personal",
+      "permissionMode": "plan",
+      "promptPrefix": "Triage this phone brainstorm: organize it, identify action items, and propose next steps. Do not modify files.\n\n"
+    }
+  ]
+}

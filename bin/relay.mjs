@@ -5,22 +5,26 @@
 //   relay notify [--title T] [--body B] [--url U]          # fire a push (body from stdin if piped)
 //   relay card  --title T [...]  [--wait[=SECS]]           # create a card; --wait blocks for a verdict
 //   relay ask   --title T [...]  [--wait[=SECS]]           # ask an open-ended question; answer is free text
-//   relay poll  <cardId> [--wait=SECS]                     # re-poll an existing card's verdict
+//   relay poll  <cardId> [--wait=SECS] [--events-since=N]   # re-poll an existing card's verdict
+//   relay reply <cardId> --body B|--body-stdin              # reply into a card's thread (no verdict)
 //   relay arm "<label>" / relay disarm                    # arm/clear the Stop-hook "task done" ping
 //
 // Every terminal result of card/choice/ask/poll is ONE line of JSON on stdout with an explicit
-// `status` (answered|pending|notfound|error|created) — parse that, not the exit code. A free-text
-// answer (`relay ask`) comes back as verdict 'reply' with the text in both `note` and a top-level
-// `reply` field. Exit codes (relay-specific): 0=approved-or-reply 20=changes_requested 1=other-verdict
-// 3=timeout 4=notfound 5=error (2=usage). On timeout the cardId is printed so Claude can re-issue
-// `relay poll <id> --wait=50` in a fresh Bash call — the bounded-poll pattern that keeps every call
-// under the harness limit.
+// `status` (answered|event|pending|notfound|error|created) — parse that, not the exit code. A
+// free-text answer (`relay ask`) comes back as verdict 'reply' with the text in both `note` and a
+// top-level `reply` field. `relay poll --events-since=N` (card threads, relay-roadmap Plan 04) can
+// come back as status 'event' (a human thread message landed instead of a verdict) — answer with
+// `relay reply <id> --body "..."`, then re-poll with --events-since set to the seq that reply
+// returned. Exit codes (relay-specific): 0=approved-or-reply 20=changes_requested 21=event
+// 1=other-verdict 3=timeout 4=notfound 5=error (2=usage). On timeout the cardId is printed so
+// Claude can re-issue `relay poll <id> --wait=50` in a fresh Bash call — the bounded-poll pattern
+// that keeps every call under the harness limit.
 
 import { readFileSync, existsSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join, extname } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { spawn } from 'node:child_process';
-import { loadConfig, configPath, relayDir, armedDir, sessionKey, afkPath, readAfk, projectFromCwd } from '../lib/relay-lib.mjs';
+import { loadConfig, configPath, relayDir, armedDir, sessionKey, afkPath, readAfk, projectFromCwd, sessionIdFromEnv } from '../lib/relay-lib.mjs';
 
 const PER_POLL_CAP = 50; // server caps at 55; leave margin
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -163,7 +167,7 @@ export function parseOptionSpec(spec) {
 // v1 drafts take LINK buttons only. Respond buttons are deliberately rejected: they would
 // collide with the editor's intrinsic copy toolbar and a respond-click's `card-updated` SSE
 // would rebuild the card from the ORIGINAL body, wiping in-progress edits.
-export function buildDraftPayload(flags, { stdin = '', cwd = '', host = null, assets = [] } = {}) {
+export function buildDraftPayload(flags, { stdin = '', cwd = '', host = null, sessionId = null, assets = [] } = {}) {
   const title = typeof flags.title === 'string' ? flags.title : null;
   if (!title) throw new Error('relay draft: --title is required');
   let body = typeof flags.body === 'string' ? flags.body : null;
@@ -175,7 +179,7 @@ export function buildDraftPayload(flags, { stdin = '', cwd = '', host = null, as
     kind: 'draft',
     title,
     body,
-    source: { cwd, host, editable: true },
+    source: { cwd, host, sessionId, editable: true },
     buttons,
     priority: flags.high ? 'high' : 'normal',
     push: flags.push ? true : false, // auto-open makes a push to the same box redundant; --push opts in
@@ -188,7 +192,7 @@ export function buildDraftPayload(flags, { stdin = '', cwd = '', host = null, as
 // answer comes back via --wait as verdict 'reply' with the text in `reply`/`note`. buildAskPayload
 // is PURE (no fs/network) so it's unit-testable; cmdAsk pre-reads stdin and passes it in. Push
 // defaults TRUE — a question needs to reach the phone — unlike `relay draft` which auto-opens locally.
-export function buildAskPayload(flags, { stdin = '', cwd = '', host = null } = {}) {
+export function buildAskPayload(flags, { stdin = '', cwd = '', host = null, sessionId = null } = {}) {
   const title = typeof flags.title === 'string' ? flags.title : null;
   if (!title) throw new Error('relay ask: --title is required');
   let body = typeof flags.body === 'string' ? flags.body : null;
@@ -210,7 +214,7 @@ export function buildAskPayload(flags, { stdin = '', cwd = '', host = null } = {
     buttons: [],
     priority: flags.high ? 'high' : 'normal',
     push: flags['no-push'] ? false : true,
-    source: { cwd, host, ...(placeholder ? { placeholder } : {}) },
+    source: { cwd, host, sessionId, ...(placeholder ? { placeholder } : {}) },
     ...(expires_at ? { expires_at } : {}),
   };
 }
@@ -265,15 +269,20 @@ export function verdictExit(verdict) {
 }
 
 // --- long-poll loop (one bounded Bash-call budget) -------------------------
-async function pollUntil(cfg, id, totalSecs) {
+// `eventsSince` (card threads, relay-roadmap Plan 04) is OPT-IN: omitted (every caller except
+// `relay poll --events-since=N`) sends the exact same request as before this plan, so the server
+// can never return status:'event' for that call — byte-identical legacy behavior (master doc §4).
+// 0 is a valid value ("since the beginning" — seq starts at 1), so this checks `!= null`.
+async function pollUntil(cfg, id, totalSecs, eventsSince) {
   const deadline = Date.now() + totalSecs * 1000;
+  const qs = eventsSince != null ? `&events_since=${encodeURIComponent(eventsSince)}` : '';
   for (;;) {
     const remaining = Math.ceil((deadline - Date.now()) / 1000);
     if (remaining <= 0) return { status: 'pending' };
     const perPoll = Math.min(remaining, PER_POLL_CAP);
     let res;
     try {
-      res = await fetch(`${cfg.url}/api/cards/${id}/response?wait=${perPoll}`, {
+      res = await fetch(`${cfg.url}/api/cards/${id}/response?wait=${perPoll}${qs}`, {
         headers: { 'x-write-token': cfg.writeToken },
       });
     } catch {
@@ -292,7 +301,7 @@ async function pollUntil(cfg, id, totalSecs) {
       await sleep(500);
       continue;
     }
-    if (data.status === 'responded') return data;
+    if (data.status === 'responded' || data.status === 'event') return data;
     // server hit its cap and returned pending — loop again if budget remains
   }
 }
@@ -389,6 +398,7 @@ async function cmdNotify(cfg, flags) {
     cwd,
     project: projectFromCwd(cwd),
     host: process.env.COMPUTERNAME || process.env.HOSTNAME || null,
+    sessionId: sessionIdFromEnv(),
   };
   let res;
   try {
@@ -467,10 +477,16 @@ export function buildChoicePayload({ title, body = null, options = [], priority 
 
 // Pure: assemble a 'page' card payload — a full agent-authored HTML+JS document rendered in a
 // sandboxed iframe on the Relay web app. page_html is a TOP-LEVEL key (the server's validateCardInput
-// reads b.page_html and createCard INSERTs it). No buttons/options: a page is view-only, not
-// responded to. Throws without a title or pageHtml. There is no CLI `relay page` command — this
-// builder exists so the MCP server (relay_page) shares the same tested payload shape.
-export function buildPagePayload({ title, pageHtml, copyText = null, priority = 'normal', push = true, expiresAt = null, source = {} }) {
+// reads b.page_html and createCard INSERTs it). No buttons/options: a page's respond affordance (if
+// any) lives INSIDE the sandboxed document, via the postMessage submit bridge (relay-roadmap Plan
+// 05) — see expectsResponse below. Throws without a title or pageHtml. There is no CLI `relay page`
+// command — this builder exists so the MCP server (relay_page) shares the same tested payload shape.
+//
+// expectsResponse: false (default) is a plain view-only page — unchanged from before Plan 05.
+// true marks the card as response-soliciting: no default expiry while pending (cards-store.ts
+// treats it like an approval) and the push is sent at high urgency (routes-cards.ts). It does NOT
+// add any button/action — the page itself must call postMessage({__relay:'submit', payload}).
+export function buildPagePayload({ title, pageHtml, copyText = null, priority = 'normal', push = true, expiresAt = null, expectsResponse = false, source = {} }) {
   if (!title) throw new Error('relay page: title is required');
   if (!pageHtml) throw new Error('relay page: html is required');
   return {
@@ -481,6 +497,7 @@ export function buildPagePayload({ title, pageHtml, copyText = null, priority = 
     buttons: [],
     priority,
     push,
+    expects_response: !!expectsResponse,
     source,
     ...(expiresAt ? { expires_at: expiresAt } : {}),
   };
@@ -545,7 +562,7 @@ async function cmdCard(cfg, flags) {
     priority: flags.high ? 'high' : 'normal',
     push: flags['no-push'] ? false : true,
     expiresAt,
-    source: { cwd: process.cwd(), host: process.env.COMPUTERNAME || process.env.HOSTNAME || null },
+    source: { cwd: process.cwd(), host: process.env.COMPUTERNAME || process.env.HOSTNAME || null, sessionId: sessionIdFromEnv() },
     pushBody: typeof flags['push-body'] === 'string' ? flags['push-body'] : null,
   });
 
@@ -592,7 +609,7 @@ async function cmdChoice(cfg, flags) {
     priority: flags.high ? 'high' : 'normal',
     push: flags['no-push'] ? false : true,
     expiresAt,
-    source: { cwd: process.cwd(), host: process.env.COMPUTERNAME || process.env.HOSTNAME || null },
+    source: { cwd: process.cwd(), host: process.env.COMPUTERNAME || process.env.HOSTNAME || null, sessionId: sessionIdFromEnv() },
   });
   return createAndWait(cfg, payload, flags, 'choice');
 }
@@ -605,7 +622,7 @@ async function cmdAsk(cfg, flags) {
   const host = process.env.COMPUTERNAME || process.env.HOSTNAME || null;
   let payload;
   try {
-    payload = buildAskPayload(flags, { stdin, cwd: process.cwd(), host });
+    payload = buildAskPayload(flags, { stdin, cwd: process.cwd(), host, sessionId: sessionIdFromEnv() });
   } catch (e) {
     die(e.message);
   }
@@ -624,7 +641,7 @@ async function cmdDraft(cfg, flags) {
 
   let payload;
   try {
-    payload = buildDraftPayload(flags, { stdin, cwd: process.cwd(), host, assets });
+    payload = buildDraftPayload(flags, { stdin, cwd: process.cwd(), host, sessionId: sessionIdFromEnv(), assets });
   } catch (e) {
     die(e.message);
   }
@@ -655,18 +672,70 @@ async function cmdDraft(cfg, flags) {
 
 async function cmdPoll(cfg, args) {
   const id = args._[0];
-  if (!id) die('usage: relay poll <cardId> [--wait=SECS]', 2);
+  if (!id) die('usage: relay poll <cardId> [--wait=SECS] [--events-since=N]', 2);
   const budget = typeof args.flags.wait === 'string' && args.flags.wait ? Math.max(1, parseInt(args.flags.wait, 10) || PER_POLL_CAP) : PER_POLL_CAP;
-  const result = await pollUntil(cfg, id, budget);
+  // --events-since (card threads, Plan 04): opt-in — omitted keeps this an ordinary verdict-only
+  // poll, exactly as before this existed. 0 is valid ("since the beginning"), so check for the
+  // flag's presence rather than truthiness.
+  const eventsSinceFlag = args.flags['events-since'];
+  const eventsSince = eventsSinceFlag !== undefined ? Math.max(0, parseInt(eventsSinceFlag, 10) || 0) : undefined;
+  const result = await pollUntil(cfg, id, budget, eventsSince);
   if (result.status === 'notfound') {
     emit({ status: 'notfound', id });
     process.stderr.write(`relay poll: card ${id} not found (expired or dismissed)\n`);
     process.exit(4);
   }
   if (result.status === 'responded') reportVerdict(id, result);
+  if (result.status === 'event') {
+    const events = result.events || [];
+    const sinceSeq = events.length ? events[events.length - 1].seq : eventsSince ?? 0;
+    emit({ status: 'event', id, events });
+    process.stderr.write(
+      `relay: new thread message on card ${id} — reply with:\n  relay reply ${id} --body "..."\n` +
+        `then keep waiting for the verdict:\n  relay poll ${id} --wait=50 --events-since=${sinceSeq}\n`,
+    );
+    process.exit(21);
+  }
   emit({ status: 'pending', id });
-  process.stderr.write(`relay: still pending. Re-poll with: relay poll ${id} --wait=50\n`);
+  process.stderr.write(
+    `relay: still pending. Re-poll with: relay poll ${id} --wait=50${eventsSince !== undefined ? ' --events-since=' + eventsSince : ''}\n`,
+  );
   process.exit(3);
+}
+
+// `relay reply` — the human's half of a card thread answered from the write side: append a
+// role:'agent' message to a pending card's thread WITHOUT resolving its verdict (relay-roadmap
+// Plan 04). Use after `relay poll` returns status 'event'. Prints the created event's seq so the
+// caller knows what --events-since to pass on the next `relay poll` call.
+async function cmdReply(cfg, args) {
+  const id = args._[0];
+  if (!id) die('usage: relay reply <cardId> --body B|--body-stdin', 2);
+  let body = typeof args.flags.body === 'string' ? args.flags.body : null;
+  if (args.flags['body-stdin']) body = (await readStdin()).trim();
+  if (!body || !body.trim()) die('relay reply: --body or --body-stdin is required');
+
+  let res;
+  try {
+    res = await fetch(`${cfg.url}/api/cards/${id}/agent-events`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-write-token': cfg.writeToken },
+      body: JSON.stringify({ type: 'message', body }),
+    });
+  } catch (e) {
+    emit({ status: 'error', error: `network error: ${e.message}` });
+    process.stderr.write(`relay reply: network error: ${e.message}\n`);
+    process.exit(5);
+  }
+  if (!res.ok) {
+    const text = await res.text();
+    emit({ status: 'error', error: `HTTP ${res.status}: ${text}` });
+    process.stderr.write(`relay reply: HTTP ${res.status}: ${text}\n`);
+    process.exit(res.status === 404 ? 4 : 5);
+  }
+  const data = await res.json();
+  const seq = data.event?.seq ?? null;
+  emit({ status: 'sent', id, seq });
+  process.stderr.write(`relay: reply sent (seq ${seq ?? '?'}) — resume with: relay poll ${id} --wait=50 --events-since=${seq ?? 0}\n`);
 }
 
 function cmdArm(args) {
@@ -737,6 +806,8 @@ async function main() {
       return cmdDraft(requireConfig(), args.flags);
     case 'poll':
       return cmdPoll(requireConfig(), args);
+    case 'reply':
+      return cmdReply(requireConfig(), args);
     case 'arm':
       return cmdArm(args);
     case 'disarm':
@@ -764,12 +835,15 @@ async function main() {
           '             # the push has a Reply button that opens a text box; --wait returns the free-text reply\n' +
           '  relay draft --title T [--body B|--body-stdin] [--image PATH]... [--link "Label=url"]...\n' +
           '             [--push] [--no-open] [--high]   # rich WYSIWYG-editable message card; opens your browser\n' +
-          '  relay poll <cardId> [--wait=SECS]\n' +
+          '  relay poll <cardId> [--wait=SECS] [--events-since=N]\n' +
+          '             # --events-since (card threads): also resolve early on a new human thread message\n' +
+          '  relay reply <cardId> --body B|--body-stdin   # reply into a card thread WITHOUT resolving it\n' +
           '  relay arm "<label>" | relay disarm\n' +
           '  relay afk [on [--reason R] | off | status]   # away-from-keyboard flag (~/.relay/afk.json)\n\n' +
-          'wait/poll: stdout is one JSON line with a status (answered|pending|notfound|error|created);\n' +
-          '  a free-text reply (relay ask) is verdict "reply" with the text in note + a top-level "reply"\n' +
-          '  exit codes: 0=approved/reply 20=changes_requested 1=other-verdict 3=timeout 4=notfound 5=error\n' +
+          'wait/poll: stdout is one JSON line with a status (answered|event|pending|notfound|error|created);\n' +
+          '  a free-text reply (relay ask) is verdict "reply" with the text in note + a top-level "reply";\n' +
+          '  status "event" (only with --events-since) means a human sent a thread message, not a verdict\n' +
+          '  exit codes: 0=approved/reply 20=changes_requested 21=event 1=other-verdict 3=timeout 4=notfound 5=error\n' +
           'afk status exit codes: 0=at desk  10=AFK\n',
       );
       return;

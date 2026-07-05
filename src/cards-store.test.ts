@@ -16,6 +16,9 @@ import {
   sweepExpired,
   getAsset,
   pruneCards,
+  validateCardEventInput,
+  appendCardEvent,
+  listCardEvents,
   __resetForTests,
 } from './cards-store.ts';
 
@@ -210,6 +213,89 @@ describe('page cards (kind:page)', () => {
   });
 });
 
+describe('page-submit bridge (expects_response — Plan 05)', () => {
+  test('validateCardInput reads expects_response as a plain boolean, defaulting false', () => {
+    const plain = validateCardInput({ kind: 'page', title: 'Viz', page_html: '<p>x</p>' });
+    expect(plain.ok).toBe(true);
+    if (plain.ok) expect(plain.value.expects_response).toBe(false);
+    const asking = validateCardInput({ kind: 'page', title: 'Q', page_html: '<p>x</p>', expects_response: true });
+    expect(asking.ok).toBe(true);
+    if (asking.ok) expect(asking.value.expects_response).toBe(true);
+  });
+
+  test('a page with expects_response:true gets no default expiry, like an approval', () => {
+    const asking = createCard(input({ kind: 'page', page_html: '<p>x</p>', expects_response: true }));
+    expect(asking.expires_at).toBeNull();
+  });
+
+  test('a plain page (expects_response omitted/false) keeps the normal 24h-bucket default expiry', () => {
+    const plain = createCard(input({ kind: 'page', page_html: '<p>x</p>' }));
+    expect(plain.expires_at).not.toBeNull();
+    expect(plain.expects_response).toBe(false);
+  });
+
+  test('createCard round-trips expects_response through getCard', () => {
+    const card = createCard(input({ kind: 'page', page_html: '<p>x</p>', expects_response: true }));
+    expect(getCard(card.id)?.expects_response).toBe(true);
+  });
+
+  test('an explicit expires_at still wins over expects_response (caller opt-out)', () => {
+    const future = new Date(Date.now() + 3_600_000).toISOString();
+    const card = createCard(input({ kind: 'page', page_html: '<p>x</p>', expects_response: true, expires_at: future }));
+    expect(card.expires_at).toBe(future);
+  });
+
+  test('respondCard passthrough: a page-submit "submit" action records verdict "submit"', () => {
+    // Pages carry no buttons (view-only), so 'submit' hits the same unknown-action passthrough
+    // used by choice options — no VALID_VERDICTS change needed (master doc §4 / plan's Design
+    // section: that list only constrains *button-declared* verdicts).
+    const card = createCard(input({ kind: 'page', page_html: '<p>x</p>', expects_response: true }));
+    const r = respondCard(card.id, { action: 'submit' });
+    expect(r.status).toBe('responded');
+    if (r.status === 'responded') {
+      expect(r.response.verdict).toBe('submit');
+      expect(r.response.action).toBe('submit');
+    }
+  });
+
+  // Review fix: the payload must be written ATOMICALLY with the responded-status flip, in the
+  // same respondCard() transaction, not via a separate appendCardEvent() call beforehand — see
+  // the comment on respondCard's `payload` parameter. This is what makes "first submit wins"
+  // actually mean the delivered payload matches the submit that resolved the card.
+  test('respondCard with a payload writes it as a card_event atomically with the verdict', () => {
+    const card = createCard(input({ kind: 'page', page_html: '<p>x</p>', expects_response: true }));
+    const r = respondCard(card.id, { action: 'submit', payload: JSON.stringify({ a: 1 }) });
+    expect(r.status).toBe('responded');
+    const events = listCardEvents(card.id);
+    expect(events).toHaveLength(1);
+    expect(events[0].type).toBe('payload');
+    expect(events[0].role).toBe('user');
+    expect(events[0].body).toBe(JSON.stringify({ a: 1 }));
+  });
+
+  test('a losing respondCard call (already responded) never writes its payload event', () => {
+    // Simulates the cross-tab race: two clients both submit a payload for the same pending page
+    // card. Only the winner's payload may ever land in card_events — the loser's must not, even
+    // though the loser's request DID arrive with a payload attached.
+    const card = createCard(input({ kind: 'page', page_html: '<p>x</p>', expects_response: true }));
+    const winner = respondCard(card.id, { action: 'submit', payload: JSON.stringify({ from: 'winner' }) });
+    expect(winner.status).toBe('responded');
+    const loser = respondCard(card.id, { action: 'submit', payload: JSON.stringify({ from: 'loser' }) });
+    expect(loser.status).toBe('conflict');
+
+    const events = listCardEvents(card.id);
+    expect(events).toHaveLength(1); // only the winner's payload was ever recorded
+    expect(events[0].body).toBe(JSON.stringify({ from: 'winner' }));
+  });
+
+  test('respondCard without a payload writes no card_event (buttons/choice/ask cards unaffected)', () => {
+    const card = createCard(input({ kind: 'approval' }));
+    const r = respondCard(card.id, { action: 'approved' });
+    expect(r.status).toBe('responded');
+    expect(listCardEvents(card.id)).toHaveLength(0);
+  });
+});
+
 describe('respondCard — first-response-wins', () => {
   test('records verdict from the matching button, then 409s the second time', () => {
     const card = createCard({
@@ -332,6 +418,99 @@ describe('assets', () => {
     const a = getAsset(card.id, card.assets[0].id);
     expect(a?.mime).toBe('image/png');
     expect(Array.from(a!.bytes)).toEqual([1, 2, 3, 4, 5]);
+  });
+});
+
+describe('card_events', () => {
+  test('append assigns seq 1..n in order', () => {
+    const card = createCard(input({ kind: 'note' }));
+    const e1 = appendCardEvent(card.id, { role: 'agent', type: 'message', body: 'hi' });
+    const e2 = appendCardEvent(card.id, { role: 'user', type: 'message', body: 'hi back' });
+    expect(e1.ok && e1.value.seq).toBe(1);
+    expect(e2.ok && e2.value.seq).toBe(2);
+    expect(listCardEvents(card.id).map((e) => e.seq)).toEqual([1, 2]);
+  });
+
+  test('sinceSeq filters to events after that seq', () => {
+    const card = createCard(input({ kind: 'note' }));
+    appendCardEvent(card.id, { role: 'agent', type: 'message', body: 'one' });
+    appendCardEvent(card.id, { role: 'agent', type: 'message', body: 'two' });
+    appendCardEvent(card.id, { role: 'agent', type: 'message', body: 'three' });
+    const after1 = listCardEvents(card.id, { sinceSeq: 1 });
+    expect(after1.map((e) => e.body)).toEqual(['two', 'three']);
+  });
+
+  test('user-role append requires status pending; agent-role append works on any status', () => {
+    const card = createCard(
+      input({ kind: 'approval', buttons: [{ id: 'approved', label: 'A', behavior: 'respond', verdict: 'approved' }] }),
+    );
+    respondCard(card.id, { action: 'approved' });
+    const userAppend = appendCardEvent(card.id, { role: 'user', type: 'message', body: 'too late' });
+    expect(userAppend.ok).toBe(false);
+    const agentAppend = appendCardEvent(card.id, { role: 'agent', type: 'message', body: 'got it, thanks' });
+    expect(agentAppend.ok).toBe(true);
+  });
+
+  test('append to an unknown card fails with "card not found"', () => {
+    const r = appendCardEvent('nope', { role: 'agent', type: 'message', body: 'x' });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toContain('not found');
+  });
+
+  test('rejects a message body over its cap; allows a payload body up to its larger cap', () => {
+    const card = createCard(input({ kind: 'note' }));
+    const overMessage = appendCardEvent(card.id, { role: 'agent', type: 'message', body: 'x'.repeat(16 * 1024 + 1) });
+    expect(overMessage.ok).toBe(false);
+    const atPayloadCap = appendCardEvent(card.id, { role: 'agent', type: 'payload', body: 'x'.repeat(64 * 1024) });
+    expect(atPayloadCap.ok).toBe(true);
+  });
+
+  test('caps a card at CARD_EVENT_MAX_PER_CARD events', () => {
+    const card = createCard(input({ kind: 'note' }));
+    for (let i = 0; i < 200; i++) {
+      expect(appendCardEvent(card.id, { role: 'agent', type: 'message', body: `m${i}` }).ok).toBe(true);
+    }
+    expect(appendCardEvent(card.id, { role: 'agent', type: 'message', body: 'one too many' }).ok).toBe(false);
+  });
+
+  test('events are deleted when their card is swept', () => {
+    const past = new Date(Date.now() - 1000).toISOString();
+    const card = createCard(input({ kind: 'note', expires_at: past }));
+    appendCardEvent(card.id, { role: 'agent', type: 'message', body: 'bye' });
+    sweepExpired();
+    const orphan = db.query('SELECT COUNT(*) AS n FROM card_events WHERE card_id = $id').get({ $id: card.id }) as any;
+    expect(orphan.n).toBe(0);
+  });
+
+  test('events are deleted when their card is pruned', () => {
+    process.env.CARD_RETENTION_DAYS = '30';
+    process.env.CARD_MAX = '500';
+    const card = createCard(input({ kind: 'note' }));
+    appendCardEvent(card.id, { role: 'agent', type: 'message', body: 'bye' });
+    db.query('UPDATE cards SET created_at = $t WHERE id = $id').run({
+      $t: new Date(Date.now() - 60 * 86400_000).toISOString(),
+      $id: card.id,
+    });
+    pruneCards();
+    const orphan = db.query('SELECT COUNT(*) AS n FROM card_events WHERE card_id = $id').get({ $id: card.id }) as any;
+    expect(orphan.n).toBe(0);
+  });
+
+  test('validateCardEventInput defaults type to message and enforces the cap', () => {
+    const ok = validateCardEventInput({ body: 'hi' });
+    expect(ok.ok).toBe(true);
+    if (ok.ok) expect(ok.value.type).toBe('message');
+    expect(validateCardEventInput({ type: 'nonsense', body: 'hi' }).ok).toBe(false);
+    expect(validateCardEventInput({ type: 'message' }).ok).toBe(false);
+  });
+
+  test('getCard reports event_count; listCards never includes it', () => {
+    const card = createCard(input({ kind: 'note' }));
+    appendCardEvent(card.id, { role: 'agent', type: 'message', body: 'a' });
+    appendCardEvent(card.id, { role: 'agent', type: 'message', body: 'b' });
+    expect(getCard(card.id)?.event_count).toBe(2);
+    const fromList = listCards().find((c) => c.id === card.id) as any;
+    expect(fromList?.event_count).toBeUndefined();
   });
 });
 

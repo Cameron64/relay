@@ -1,6 +1,7 @@
 import { ActionIcon, Box, Button, Group, Text, Tooltip, useComputedColorScheme, useMantineColorScheme } from '@mantine/core';
 import { usePush } from '../hooks/usePush';
-import { Activity } from './Activity';
+import { SessionsPanel } from './SessionsPanel';
+import type { Dispatch } from '../types';
 
 // Injected at build time by Vite `define` (see vite.config.ts).
 declare const __BUILD_ID__: string;
@@ -30,7 +31,21 @@ async function hardRefresh(): Promise<void> {
   location.reload();
 }
 
-export function TopBar({ showLock, onLock }: { showLock: boolean; onLock: () => void }) {
+export function TopBar({
+  showLock,
+  onLock,
+  onCompose,
+  onFollowUp,
+  onOpenActivity,
+}: {
+  showLock: boolean;
+  onLock: () => void;
+  onCompose?: () => void;
+  // Both undefined together outside the 'feed' view (same gating as onCompose) — the Sessions
+  // button and the Activity button only make sense once there's a feed to act on.
+  onFollowUp?: (d: Dispatch) => void;
+  onOpenActivity?: (sessionId?: string | null) => void;
+}) {
   const { setColorScheme } = useMantineColorScheme();
   const computed = useComputedColorScheme('light', { getInitialValueInEffect: true });
   const push = usePush();
@@ -56,6 +71,14 @@ export function TopBar({ showLock, onLock }: { showLock: boolean; onLock: () => 
       </Group>
 
       <Group gap="xs" align="center">
+        {onCompose ? (
+          <Tooltip label="New dispatch — send a brainstorm to your desktop" openDelay={300}>
+            <ActionIcon variant="filled" color="indigo" onClick={onCompose} aria-label="New dispatch">
+              +
+            </ActionIcon>
+          </Tooltip>
+        ) : null}
+
         {push.supported ? (
           <Tooltip label={push.status} disabled={!push.status} openDelay={300}>
             <Button
@@ -92,7 +115,15 @@ export function TopBar({ showLock, onLock }: { showLock: boolean; onLock: () => 
           </ActionIcon>
         </Tooltip>
 
-        {showLock ? <Activity /> : null}
+        {showLock && onFollowUp && onOpenActivity ? <SessionsPanel onFollowUp={onFollowUp} onOpenActivity={onOpenActivity} /> : null}
+
+        {showLock && onOpenActivity ? (
+          <Tooltip label="Notification history" openDelay={300}>
+            <Button variant="subtle" size="xs" color="gray" onClick={() => onOpenActivity()} aria-label="Notification history">
+              Activity
+            </Button>
+          </Tooltip>
+        ) : null}
 
         {showLock ? (
           <Button variant="subtle" size="xs" color="gray" onClick={onLock} title="Forget this device">
