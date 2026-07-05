@@ -1,7 +1,7 @@
 import { forwardRef, useEffect, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import { ActionIcon, Badge, Group, Modal, Text } from '@mantine/core';
-import { postCardEvent, respond } from '../../api';
+import { respond } from '../../api';
 import { useFeed } from '../../store/feed';
 import type { Card } from '../../types';
 
@@ -101,13 +101,17 @@ export function PageFrame({ card }: { card: Card }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pageHtml, card.id]);
 
-  // Order matters (master doc §4): the payload's permanent home is the card_events row, never
-  // `response` (which stays a bare verdict forever). Store the payload FIRST, then respond — so
-  // anything that wakes on the verdict (relay_page's blocking poll) can already find the payload
-  // when it looks. A 409 from respond means another client (or another tab) answered first.
+  // The payload's permanent home is the card_events row, never `response` (which stays a bare
+  // verdict forever, master doc §4) — but it's written by respond() itself, in the SAME server
+  // transaction as the pending->responded flip (see respondCard in cards-store.ts), not via a
+  // separate postCardEvent call beforehand. That atomicity is load-bearing: it's what guarantees
+  // "first submit wins" actually means the payload the agent receives matches the submit that
+  // resolved the card, even when two clients (two tabs, phone + desktop) race to submit at once —
+  // a losing respond() call 409s and its payload is never written, full stop. It also means a
+  // failed payload write can never be silently swallowed while still reporting "sent": the single
+  // request either succeeds (payload persisted + card responded) or it doesn't, atomically.
   async function submitPayload(json: string) {
-    await postCardEvent(card.id, 'payload', json);
-    const r = await respond(card.id, 'submit', null);
+    const r = await respond(card.id, 'submit', null, json);
     if (r.status === 'conflict') {
       setSubmitState('conflict');
       if (r.response) applyResolved(card.id, r.response);
@@ -115,6 +119,9 @@ export function PageFrame({ card }: { card: Card }) {
     }
     if (r.status === 'error') {
       setSubmitState('error');
+      // Allow a resubmit: this request never landed (network error, 5xx, over the per-card event
+      // cap), so the card is still pending server-side and nothing was persisted.
+      submittedRef.current = false;
       return;
     }
     setSubmitState('sent');

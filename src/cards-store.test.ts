@@ -257,6 +257,43 @@ describe('page-submit bridge (expects_response — Plan 05)', () => {
       expect(r.response.action).toBe('submit');
     }
   });
+
+  // Review fix: the payload must be written ATOMICALLY with the responded-status flip, in the
+  // same respondCard() transaction, not via a separate appendCardEvent() call beforehand — see
+  // the comment on respondCard's `payload` parameter. This is what makes "first submit wins"
+  // actually mean the delivered payload matches the submit that resolved the card.
+  test('respondCard with a payload writes it as a card_event atomically with the verdict', () => {
+    const card = createCard(input({ kind: 'page', page_html: '<p>x</p>', expects_response: true }));
+    const r = respondCard(card.id, { action: 'submit', payload: JSON.stringify({ a: 1 }) });
+    expect(r.status).toBe('responded');
+    const events = listCardEvents(card.id);
+    expect(events).toHaveLength(1);
+    expect(events[0].type).toBe('payload');
+    expect(events[0].role).toBe('user');
+    expect(events[0].body).toBe(JSON.stringify({ a: 1 }));
+  });
+
+  test('a losing respondCard call (already responded) never writes its payload event', () => {
+    // Simulates the cross-tab race: two clients both submit a payload for the same pending page
+    // card. Only the winner's payload may ever land in card_events — the loser's must not, even
+    // though the loser's request DID arrive with a payload attached.
+    const card = createCard(input({ kind: 'page', page_html: '<p>x</p>', expects_response: true }));
+    const winner = respondCard(card.id, { action: 'submit', payload: JSON.stringify({ from: 'winner' }) });
+    expect(winner.status).toBe('responded');
+    const loser = respondCard(card.id, { action: 'submit', payload: JSON.stringify({ from: 'loser' }) });
+    expect(loser.status).toBe('conflict');
+
+    const events = listCardEvents(card.id);
+    expect(events).toHaveLength(1); // only the winner's payload was ever recorded
+    expect(events[0].body).toBe(JSON.stringify({ from: 'winner' }));
+  });
+
+  test('respondCard without a payload writes no card_event (buttons/choice/ask cards unaffected)', () => {
+    const card = createCard(input({ kind: 'approval' }));
+    const r = respondCard(card.id, { action: 'approved' });
+    expect(r.status).toBe('responded');
+    expect(listCardEvents(card.id)).toHaveLength(0);
+  });
 });
 
 describe('respondCard — first-response-wins', () => {

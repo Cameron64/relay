@@ -94,13 +94,18 @@ export type RespondResult =
   | { status: 'conflict'; response?: CardResponse }
   | { status: 'error' };
 
-export async function respond(cardId: string, action: string, note: string | null): Promise<RespondResult> {
+// `payload`, when given, is a JSON string recorded as a card_event ATOMICALLY with this respond
+// (Plan 05's page-submit bridge) — see respondCard in cards-store.ts. Passing it here (rather than
+// a separate postCardEvent call before respond) is load-bearing: it guarantees that a losing
+// client in a cross-tab submit race never gets its payload persisted at all, so the highest-seq
+// 'payload' row for a card is always the one that belongs to the respond() call that actually won.
+export async function respond(cardId: string, action: string, note: string | null, payload?: string): Promise<RespondResult> {
   let res: Response;
   try {
     res = await api(`/api/cards/${cardId}/respond`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ action, note }),
+      body: JSON.stringify(payload === undefined ? { action, note } : { action, note, payload }),
     });
   } catch {
     return { status: 'error' };

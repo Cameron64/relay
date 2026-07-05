@@ -457,12 +457,24 @@ export function listCards(opts: { since?: string; limit?: number } = {}): Card[]
 }
 
 export type RespondResult =
-  | { status: 'responded'; response: CardResponse }
+  | { status: 'responded'; response: CardResponse; event?: CardEvent }
   | { status: 'conflict'; response: CardResponse | null }
   | { status: 'reserved' }
-  | { status: 'notfound' };
+  | { status: 'notfound' }
+  | { status: 'payload_cap' };
 
-export function respondCard(id: string, input: { action: string; note?: string | null }): RespondResult {
+// `payload`, when provided, is a pre-validated (size-checked by the caller, via
+// validateCardEventInput) JSON string to record as a 'payload' card_event IN THE SAME
+// TRANSACTION as the responded-status flip (Plan 05's page-submit bridge). This is the fix for
+// the cross-tab/cross-client race: two clients racing to submit the same page card could
+// previously each write their own 'payload' event via the separate events endpoint BEFORE either
+// respond() call landed, so the highest-seq payload row picked up by relay-mcp's withPagePayload
+// was not necessarily the one that belonged to the respond() call that actually won. Folding the
+// payload write into respondCard's own transaction means only the WINNING call — the one that
+// actually flips status from 'pending' to 'responded' — ever inserts a payload event; a losing
+// call sees `status === 'responded'` already and returns 'conflict' without touching card_events
+// at all, exactly mirroring the semantics of a losing respond(). See PageFrame.tsx's submitPayload.
+export function respondCard(id: string, input: { action: string; note?: string | null; payload?: string }): RespondResult {
   // Reserved-namespace guard: action ids starting with '__' are internal sentinels — notably the
   // notification "Reply" button (prompt cards) posts '__reply' from an OUT-OF-DATE service worker
   // that predates this feature. They must never be recorded as a verdict. Rejecting here also makes
@@ -473,6 +485,12 @@ export function respondCard(id: string, input: { action: string; note?: string |
     const row = db.query('SELECT status, response, buttons FROM cards WHERE id = $id').get({ $id: id }) as any;
     if (!row) return { status: 'notfound' };
     if (row.status === 'responded') return { status: 'conflict', response: safeJSON<CardResponse | null>(row.response, null) };
+    // Per-card event cap, checked BEFORE the status flip so a losing/edge-case cap hit never
+    // leaves the card responded with no payload recorded (all-or-nothing, same transaction).
+    if (input.payload !== undefined) {
+      const countRow = db.query('SELECT COUNT(*) AS n FROM card_events WHERE card_id = $cid').get({ $cid: id }) as { n: number };
+      if (countRow.n >= CARD_EVENT_MAX_PER_CARD) return { status: 'payload_cap' };
+    }
     const buttons = safeJSON<Button[]>(row.buttons, []);
     const btn = buttons.find((b) => b.id === input.action);
     const verdict = btn?.verdict ?? input.action;
@@ -494,7 +512,21 @@ export function respondCard(id: string, input: { action: string; note?: string |
         $id: id,
       });
     }
-    return { status: 'responded', response };
+    let event: CardEvent | undefined;
+    if (input.payload !== undefined) {
+      const seqRow = db.query('SELECT COALESCE(MAX(seq), 0) AS m FROM card_events WHERE card_id = $cid').get({ $cid: id }) as { m: number };
+      const seq = seqRow.m + 1;
+      db.query('INSERT INTO card_events (card_id, seq, role, type, body, at) VALUES ($cid, $seq, $role, $type, $body, $at)').run({
+        $cid: id,
+        $seq: seq,
+        $role: 'user',
+        $type: 'payload',
+        $body: input.payload,
+        $at: response.at,
+      });
+      event = { card_id: id, seq, role: 'user', type: 'payload', body: input.payload, at: response.at };
+    }
+    return { status: 'responded', response, event };
   });
   return tx();
 }

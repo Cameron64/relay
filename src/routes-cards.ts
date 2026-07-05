@@ -259,14 +259,32 @@ appRoutes.post('/cards/:id/respond', requireUi, async (c) => {
   if (!action) return c.json({ error: 'action required' }, 400);
   const note = typeof body?.note === 'string' ? body.note.slice(0, 4000) : null;
 
-  const result = cards.respondCard(id, { action, note });
+  // Optional page-submit payload (Plan 05): validated with the SAME rules as the events endpoint
+  // (type/size), then handed to respondCard to write atomically with the status flip — see the
+  // comment on respondCard for why this must be one transaction, not a separate events POST.
+  let payload: string | undefined;
+  if (body?.payload !== undefined) {
+    const v = cards.validateCardEventInput({ type: 'payload', body: body.payload });
+    if (!v.ok) return c.json({ error: v.error }, 400);
+    payload = v.value.body;
+  }
+
+  const result = cards.respondCard(id, { action, note, payload });
   if (result.status === 'notfound') return c.json({ error: 'not found' }, 404);
   // Reserved sentinel (e.g. '__reply' from a stale SW) — reject so the old SW falls back to opening
   // the app at the reply composer instead of recording a junk verdict. See respondCard's guard.
   if (result.status === 'reserved') return c.json({ error: 'reserved action' }, 400);
   if (result.status === 'conflict') return c.json({ error: 'already responded', response: result.response }, 409);
+  if (result.status === 'payload_cap') return c.json({ error: `card has reached the max of ${cards.CARD_EVENT_MAX_PER_CARD} events` }, 409);
 
   resolveWaiters(id, result.response);
+  // A payload event was written atomically with this respond (Plan 05) — wake any long-poller on
+  // GET events and broadcast it over SSE, same as the dedicated events endpoint does, so a thread
+  // view or the write-side events poll sees it immediately instead of waiting out its timeout.
+  if (result.event) {
+    notifyEventWaiters(id);
+    await broadcast('card-event', { cardId: id, event: result.event });
+  }
   const card = cards.getCard(id);
   await broadcast('card-updated', card);
   return c.json({ ok: true, response: result.response });

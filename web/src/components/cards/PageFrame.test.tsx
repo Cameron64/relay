@@ -3,18 +3,16 @@ import { render, cleanup, screen, waitFor, act } from '@testing-library/react';
 import { MantineProvider } from '@mantine/core';
 import { SandboxedPageIframe, PageFrame } from './PageFrame';
 import { useFeed } from '../../store/feed';
-import { postCardEvent, respond } from '../../api';
+import { respond } from '../../api';
 import type { Card } from '../../types';
 
 vi.mock('../../api', () => ({
-  postCardEvent: vi.fn(),
   respond: vi.fn(),
 }));
 
 afterEach(cleanup);
 beforeEach(() => {
   useFeed.getState().clear();
-  vi.mocked(postCardEvent).mockReset();
   vi.mocked(respond).mockReset();
 });
 
@@ -87,7 +85,6 @@ describe('PageFrame — postMessage submit bridge', () => {
     const { container } = renderPage(card);
     postMessageFromFrame(container, { __relay: 'submit', payload: { a: 1 } }, window);
     await new Promise((r) => setTimeout(r, 0));
-    expect(postCardEvent).not.toHaveBeenCalled();
     expect(respond).not.toHaveBeenCalled();
   });
 
@@ -98,7 +95,6 @@ describe('PageFrame — postMessage submit bridge', () => {
     postMessageFromFrame(container, { __relay: 'nonsense' });
     postMessageFromFrame(container, 'not even an object');
     await new Promise((r) => setTimeout(r, 0));
-    expect(postCardEvent).not.toHaveBeenCalled();
     expect(respond).not.toHaveBeenCalled();
   });
 
@@ -108,31 +104,24 @@ describe('PageFrame — postMessage submit bridge', () => {
     const big = { blob: 'x'.repeat(70 * 1024) };
     postMessageFromFrame(container, { __relay: 'submit', payload: big });
     await new Promise((r) => setTimeout(r, 0));
-    expect(postCardEvent).not.toHaveBeenCalled();
     expect(respond).not.toHaveBeenCalled();
   });
 
-  test('first submit wins: stores the payload event before responding, then ignores a second submit', async () => {
+  // The payload is sent as part of the SAME respond() call, not a separate postCardEvent POST
+  // beforehand — this is the fix for the cross-tab submit race (a losing respond() 409s and its
+  // payload is never persisted, instead of both clients' payloads racing to be the newest
+  // card_events row regardless of which respond() actually won). See respond() in api.ts and
+  // respondCard in cards-store.ts.
+  test('first submit wins: sends the payload atomically with respond, then ignores a second submit', async () => {
     const card = baseCard();
     const { container } = renderPage(card);
-    const order: string[] = [];
-    vi.mocked(postCardEvent).mockImplementation(async () => {
-      order.push('event');
-      return { status: 'ok', event: {} as any };
-    });
-    vi.mocked(respond).mockImplementation(async () => {
-      order.push('respond');
-      return { status: 'ok', response: { verdict: 'submit', note: null } };
-    });
+    vi.mocked(respond).mockResolvedValue({ status: 'ok', response: { verdict: 'submit', note: null } });
 
     postMessageFromFrame(container, { __relay: 'submit', payload: { a: 1 } });
     postMessageFromFrame(container, { __relay: 'submit', payload: { a: 2 } }); // second — ignored
 
     await waitFor(() => expect(respond).toHaveBeenCalledTimes(1));
-    expect(postCardEvent).toHaveBeenCalledTimes(1);
-    expect(order).toEqual(['event', 'respond']); // payload event lands BEFORE the verdict resolves
-    expect(postCardEvent).toHaveBeenCalledWith('c1', 'payload', JSON.stringify({ a: 1 }));
-    expect(respond).toHaveBeenCalledWith('c1', 'submit', null);
+    expect(respond).toHaveBeenCalledWith('c1', 'submit', null, JSON.stringify({ a: 1 }));
 
     await waitFor(() => expect(screen.getByText('Answer sent ✓')).toBeInTheDocument());
   });
@@ -140,7 +129,6 @@ describe('PageFrame — postMessage submit bridge', () => {
   test('a 409 from respond (already answered elsewhere) shows the conflict state', async () => {
     const card = baseCard();
     const { container } = renderPage(card);
-    vi.mocked(postCardEvent).mockResolvedValue({ status: 'ok', event: {} as any });
     vi.mocked(respond).mockResolvedValue({ status: 'conflict', response: { verdict: 'submit', note: null } });
 
     postMessageFromFrame(container, { __relay: 'submit', payload: { a: 1 } });
@@ -148,15 +136,23 @@ describe('PageFrame — postMessage submit bridge', () => {
     await waitFor(() => expect(screen.getByText('Already answered')).toBeInTheDocument());
   });
 
-  test('a network error on respond shows an error state (does not crash)', async () => {
+  test('a network error on respond shows an error state (does not crash) and allows a resubmit', async () => {
     const card = baseCard();
     const { container } = renderPage(card);
-    vi.mocked(postCardEvent).mockResolvedValue({ status: 'ok', event: {} as any });
-    vi.mocked(respond).mockResolvedValue({ status: 'error' });
+    vi.mocked(respond).mockResolvedValueOnce({ status: 'error' });
 
     postMessageFromFrame(container, { __relay: 'submit', payload: { a: 1 } });
 
     await waitFor(() => expect(screen.getByText('Could not send')).toBeInTheDocument());
+
+    // Nothing was persisted server-side (respond never resolved), so a later submit must not be
+    // silently dropped by the "first submit wins" guard — the failed attempt didn't count.
+    vi.mocked(respond).mockResolvedValueOnce({ status: 'ok', response: { verdict: 'submit', note: null } });
+    postMessageFromFrame(container, { __relay: 'submit', payload: { a: 2 } });
+
+    await waitFor(() => expect(respond).toHaveBeenCalledTimes(2));
+    expect(respond).toHaveBeenLastCalledWith('c1', 'submit', null, JSON.stringify({ a: 2 }));
+    await waitFor(() => expect(screen.getByText('Answer sent ✓')).toBeInTheDocument());
   });
 
   test('the ready/expectsResponse handshake shows a "waiting for your input" banner while pending', async () => {
