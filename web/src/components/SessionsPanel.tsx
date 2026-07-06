@@ -231,6 +231,18 @@ export function SessionsPanel({
     return map;
   }, [cards]);
 
+  // At-a-glance status counts for the drawer header — answers "does anything need me?" before
+  // scanning the list. ended + stale collapse into one "idle" tally (neither wants action).
+  const counts = useMemo(() => {
+    const c = { needsInput: 0, active: 0, idle: 0 };
+    for (const s of sessions) {
+      if (s.status === 'needs-input') c.needsInput++;
+      else if (s.status === 'active') c.active++;
+      else c.idle++;
+    }
+    return c;
+  }, [sessions]);
+
   return (
     <>
       <Tooltip label="Which Claude sessions exist, and do they need you" openDelay={300}>
@@ -276,6 +288,23 @@ export function SessionsPanel({
           </Text>
         ) : (
           <Stack gap="sm" pb="md">
+            <Group gap="xs">
+              {counts.needsInput > 0 ? (
+                <Badge color="red" variant="filled" size="sm">
+                  {counts.needsInput} need{counts.needsInput === 1 ? 's' : ''} input
+                </Badge>
+              ) : null}
+              {counts.active > 0 ? (
+                <Badge color="indigo" variant="light" size="sm">
+                  {counts.active} active
+                </Badge>
+              ) : null}
+              {counts.idle > 0 ? (
+                <Badge color="gray" variant="light" size="sm">
+                  {counts.idle} idle
+                </Badge>
+              ) : null}
+            </Group>
             {sessions.map((s) => (
               <SessionRow
                 key={s.sessionId ?? `${s.cwd ?? ''}|${s.host ?? ''}`}
