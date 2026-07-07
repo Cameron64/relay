@@ -4,7 +4,7 @@
 // run — no network, no child_process spawn, no ~/.relay/runner.json touched by this test file.
 import { test, expect, describe } from 'bun:test';
 // @ts-ignore — zero-dep .mjs daemon has no .d.ts; the helpers under test are plain functions.
-import { parseRunnerConfig, resolveTarget, buildPrompt, parseClaudeOutput, isValidClaudeSessionId } from '../bin/relay-runner.mjs';
+import { parseRunnerConfig, resolveTarget, buildPrompt, parseClaudeOutput, isValidClaudeSessionId, safeAssetFilename } from '../bin/relay-runner.mjs';
 
 describe('parseRunnerConfig', () => {
   test('parses a full config', () => {
@@ -90,6 +90,51 @@ describe('buildPrompt', () => {
     const target = { id: 'notes', label: 'notes', cwd: '/x', promptPrefix: '' };
     const p = buildPrompt(target, '/jobs/1/brainstorm.md');
     expect(p).toContain('Triage this phone brainstorm');
+  });
+
+  test('omits the attachments block when no files are attached', () => {
+    const target = { id: 'notes', label: 'notes', cwd: '/x', promptPrefix: '' };
+    const p = buildPrompt(target, '/jobs/1/brainstorm.md', []);
+    expect(p).not.toContain('attached');
+  });
+
+  test('lists attached files with their paths when present', () => {
+    const target = { id: 'notes', label: 'notes', cwd: '/x', promptPrefix: '' };
+    const p = buildPrompt(target, '/jobs/1/brainstorm.md', ['/jobs/1/photo.jpg', '/jobs/1/log.txt']);
+    expect(p).toContain('attached 2 file(s)');
+    expect(p).toContain('/jobs/1/photo.jpg');
+    expect(p).toContain('/jobs/1/log.txt');
+  });
+});
+
+// safeAssetFilename is the ONLY place phone-supplied text becomes a path on the runner host, so
+// path traversal, absolute paths, and dotfile creation must all be neutralized (see the file
+// header's SECURITY INVARIANT). The result is always a single path segment joined onto JOBS_DIR.
+describe('safeAssetFilename', () => {
+  test('keeps an ordinary filename intact', () => {
+    expect(safeAssetFilename('photo.jpg', 'a1')).toBe('photo.jpg');
+  });
+
+  test('strips directory components (POSIX and Windows traversal)', () => {
+    expect(safeAssetFilename('../../etc/passwd', 'a1')).toBe('passwd');
+    expect(safeAssetFilename('..\\..\\Windows\\system32\\evil.dll', 'a1')).toBe('evil.dll');
+    expect(safeAssetFilename('/abs/path/thing.png', 'a1')).toBe('thing.png');
+  });
+
+  test('neutralizes a bare .. and leading dots (no dotfiles)', () => {
+    expect(safeAssetFilename('..', 'a1')).toBe('attachment-a1');
+    expect(safeAssetFilename('.ssh', 'a1')).toBe('ssh');
+  });
+
+  test('collapses disallowed characters to underscores', () => {
+    expect(safeAssetFilename('a b.txt', 'a1')).toBe('a_b.txt');
+    expect(safeAssetFilename('x&y.png', 'a1')).toBe('x_y.png');
+  });
+
+  test('falls back to an asset-id-keyed name when nothing usable survives', () => {
+    expect(safeAssetFilename('', 'a1')).toBe('attachment-a1');
+    expect(safeAssetFilename('///', 'a1')).toBe('attachment-a1');
+    expect(safeAssetFilename(null, 'x/y')).toBe('attachment-xy');
   });
 });
 

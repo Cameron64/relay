@@ -38,6 +38,7 @@ export type Dispatch = {
   claude_session: string | null;
   result_summary: string | null;
   result_card_id: string | null;
+  assets: DispatchAssetMeta[];
 };
 
 export type DispatchInput = {
@@ -48,6 +49,14 @@ export type DispatchInput = {
 };
 
 export type DispatchTarget = { id: string; label: string };
+
+// Metadata returned in a hydrated Dispatch (bytes are fetched separately via getDispatchAsset,
+// exactly as card_assets never ship bytes inside a hydrated Card).
+export type DispatchAssetMeta = { id: string; filename: string; mime: string };
+
+// A decoded, size-checked upload ready to persist (bytes materialized). Produced by
+// decodeDispatchAssets from the wire form {filename, mime, data(base64)}.
+export type DispatchAsset = { filename: string; mime: string; bytes: Uint8Array };
 
 export type StatusUpdateInput = {
   status: 'running' | 'done' | 'failed';
@@ -63,6 +72,15 @@ type Err = { ok: false; error: string };
 // SQLite row + the dispatch-updated SSE broadcast) from growing without bound. Default 256 KB —
 // generous for a phone brainstorm, small enough to never threaten the row/broadcast size.
 export const DISPATCH_BODY_MAX = Number(process.env.DISPATCH_BODY_MAX ?? 256 * 1024);
+
+// Attachment caps for the phone → runner upload path. Unlike card_assets (images only, 3 MB), a
+// dispatch may carry arbitrary files (a log, a screenshot, a PDF) so the per-file cap is larger and
+// the mime is NOT restricted to image/*. The count cap mirrors card_assets' MAX_ASSETS.
+export const MAX_DISPATCH_ASSETS = 8;
+export const DISPATCH_ASSET_MAX_BYTES = Number(process.env.DISPATCH_ASSET_MAX_BYTES ?? 10 * 1024 * 1024); // 10 MB/file
+const ASSET_FILENAME_MAX = 255;
+const ASSET_MIME_MAX = 200;
+
 const TITLE_MAX = 300;
 const TARGET_MAX = 200;
 const RESULT_SUMMARY_MAX = 2000;
@@ -97,6 +115,15 @@ export function ensureDispatchSchema(): void {
         result_card_id TEXT
       );
       CREATE INDEX IF NOT EXISTS idx_dispatch_status ON dispatches(status, created_at);
+      CREATE TABLE IF NOT EXISTS dispatch_assets (
+        id           TEXT PRIMARY KEY,
+        dispatch_id  TEXT NOT NULL,
+        filename     TEXT NOT NULL,
+        mime         TEXT NOT NULL,
+        bytes        BLOB NOT NULL,
+        created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_dispatch_assets_dispatch ON dispatch_assets(dispatch_id);
       CREATE TABLE IF NOT EXISTS dispatch_targets (
         host       TEXT NOT NULL,
         id         TEXT NOT NULL,
@@ -133,6 +160,39 @@ export function validateDispatchInput(body: unknown): Ok<DispatchInput> | Err {
   if (targetRaw.length > TARGET_MAX) return { ok: false, error: `target exceeds ${TARGET_MAX} bytes` };
   const resume_of = typeof b.resume_of === 'string' && b.resume_of.trim() ? b.resume_of.trim() : null;
   return { ok: true, value: { title, body: text, target: targetRaw, resume_of } };
+}
+
+// Decode + size-check the optional inline uploads on a compose request. Mirrors routes-cards.ts's
+// inline asset handling, but (a) accepts ANY mime (phone uploads files, not just images) and
+// (b) requires a filename so the runner can materialize a sensibly-named file for Claude to read.
+// Bytes are materialized here; the raw filename is passed through UNSANITIZED on purpose — the
+// runner is the only thing that ever writes these to a filesystem, and it sanitizes at write time
+// (see safeAssetFilename in bin/relay-runner.mjs). The server only ever stores/serves the bytes.
+export function decodeDispatchAssets(raw: unknown): Ok<DispatchAsset[]> | Err {
+  if (raw === undefined || raw === null) return { ok: true, value: [] };
+  if (!Array.isArray(raw)) return { ok: false, error: 'assets must be an array' };
+  if (raw.length > MAX_DISPATCH_ASSETS) return { ok: false, error: `too many assets (max ${MAX_DISPATCH_ASSETS})` };
+  const out: DispatchAsset[] = [];
+  for (const a of raw) {
+    if (typeof a !== 'object' || a === null) return { ok: false, error: 'each asset must be an object' };
+    const rec = a as Record<string, unknown>;
+    const mime = typeof rec.mime === 'string' && rec.mime.trim() ? rec.mime.trim().slice(0, ASSET_MIME_MAX) : null;
+    const filename = typeof rec.filename === 'string' && rec.filename.trim() ? rec.filename.trim().slice(0, ASSET_FILENAME_MAX) : null;
+    const dataB64 = typeof rec.data === 'string' ? rec.data : null;
+    if (!mime) return { ok: false, error: 'asset mime required' };
+    if (!filename) return { ok: false, error: 'asset filename required' };
+    if (!dataB64) return { ok: false, error: 'asset data (base64) required' };
+    let buf: Buffer;
+    try {
+      buf = Buffer.from(dataB64, 'base64');
+    } catch {
+      return { ok: false, error: 'invalid base64 asset' };
+    }
+    if (buf.length === 0) return { ok: false, error: 'empty asset' };
+    if (buf.length > DISPATCH_ASSET_MAX_BYTES) return { ok: false, error: `asset exceeds ${DISPATCH_ASSET_MAX_BYTES} bytes` };
+    out.push({ filename, mime, bytes: new Uint8Array(buf) });
+  }
+  return { ok: true, value: out };
 }
 
 export function validateStatusUpdate(body: unknown): Ok<StatusUpdateInput> | Err {
@@ -173,6 +233,9 @@ export function validateTargetsInput(body: unknown): Ok<{ host: string; targets:
 // --- CRUD --------------------------------------------------------------------
 
 function hydrate(row: any): Dispatch {
+  const assets = db
+    .query('SELECT id, filename, mime FROM dispatch_assets WHERE dispatch_id = $id ORDER BY created_at ASC, id ASC')
+    .all({ $id: row.id }) as any[];
   return {
     id: row.id,
     created_at: row.created_at,
@@ -187,6 +250,7 @@ function hydrate(row: any): Dispatch {
     claude_session: row.claude_session,
     result_summary: row.result_summary,
     result_card_id: row.result_card_id,
+    assets: assets.map((a) => ({ id: a.id, filename: a.filename, mime: a.mime })),
   };
 }
 
@@ -195,7 +259,7 @@ function hydrate(row: any): Dispatch {
 // owned row): the child row is self-contained, and the runner never needs to fetch the parent.
 // Only a `done` parent with a recorded session can be resumed; anything else is rejected so the
 // UI's "Follow-up" affordance (only shown when done) can't be raced by a stale/parallel request.
-export function createDispatch(value: DispatchInput): Ok<Dispatch> | Err {
+export function createDispatch(value: DispatchInput, assets: DispatchAsset[] = []): Ok<Dispatch> | Err {
   const tx = db.transaction((): Ok<Dispatch> | Err => {
     let claudeSession: string | null = null;
     if (value.resume_of) {
@@ -220,9 +284,31 @@ export function createDispatch(value: DispatchInput): Ok<Dispatch> | Err {
       $resume_of: value.resume_of,
       $claude_session: claudeSession,
     });
+    for (const a of assets) {
+      db.query(
+        'INSERT INTO dispatch_assets (id, dispatch_id, filename, mime, bytes, created_at) VALUES ($id, $did, $filename, $mime, $bytes, $created)',
+      ).run({
+        $id: genId(),
+        $did: id,
+        $filename: a.filename,
+        $mime: a.mime,
+        $bytes: a.bytes,
+        $created: now,
+      });
+    }
     return { ok: true, value: hydrate(db.query('SELECT * FROM dispatches WHERE id = $id').get({ $id: id })) };
   });
   return tx();
+}
+
+/** Fetch one asset's bytes (runner download + phone preview). Scoped by dispatch_id so a leaked
+ * asset id can't be dereferenced without also knowing its dispatch. Mirrors cards-store getAsset. */
+export function getDispatchAsset(dispatchId: string, assetId: string): { filename: string; mime: string; bytes: Uint8Array } | null {
+  const row = db
+    .query('SELECT filename, mime, bytes FROM dispatch_assets WHERE id = $aid AND dispatch_id = $did')
+    .get({ $aid: assetId, $did: dispatchId }) as any;
+  if (!row) return null;
+  return { filename: row.filename, mime: row.mime, bytes: row.bytes as Uint8Array };
 }
 
 export function getDispatch(id: string): Dispatch | null {
@@ -384,12 +470,18 @@ export function pruneDispatches(): void {
   const days = Number(process.env.DISPATCH_RETENTION_DAYS ?? 14);
   if (!(days > 0)) return;
   const cutoff = new Date(Date.now() - days * 86_400_000).toISOString();
-  db.query("DELETE FROM dispatches WHERE status IN ('done','failed','cancelled') AND finished_at IS NOT NULL AND finished_at < $cutoff").run({
-    $cutoff: cutoff,
+  const tx = db.transaction(() => {
+    db.query("DELETE FROM dispatches WHERE status IN ('done','failed','cancelled') AND finished_at IS NOT NULL AND finished_at < $cutoff").run({
+      $cutoff: cutoff,
+    });
+    // Reap now-orphaned attachment blobs (no FK cascade in SQLite by default), mirroring
+    // cards-store's `DELETE FROM card_assets WHERE card_id NOT IN (SELECT id FROM cards)`.
+    db.query('DELETE FROM dispatch_assets WHERE dispatch_id NOT IN (SELECT id FROM dispatches)').run();
   });
+  tx();
 }
 
-/** Test-only: wipe both dispatch tables. Guarded the same way cards-store's reset is. */
+/** Test-only: wipe all dispatch tables. Guarded the same way cards-store's reset is. */
 export function __resetForTests(): void {
-  db.exec('DELETE FROM dispatch_targets; DELETE FROM dispatches;');
+  db.exec('DELETE FROM dispatch_assets; DELETE FROM dispatch_targets; DELETE FROM dispatches;');
 }

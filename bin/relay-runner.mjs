@@ -119,9 +119,30 @@ export function resolveTarget(config, targetId) {
   return config.targets.find((t) => t.id === targetId) ?? null;
 }
 
-export function buildPrompt(target, jobFile) {
+export function buildPrompt(target, jobFile, assetFiles = []) {
   const prefix = target.promptPrefix || 'Triage this phone brainstorm: organize it, identify action items, and propose next steps.\n\n';
-  return `${prefix}The user sent this from their phone. Full text is at ${jobFile} — read it first.\nWhen finished, summarize what you did/found.`;
+  let attachments = '';
+  if (assetFiles.length) {
+    const list = assetFiles.map((f) => `  - ${f}`).join('\n');
+    attachments = `\nThe user also attached ${assetFiles.length} file(s) from their phone (images or documents). They are saved next to the text at:\n${list}\nInspect any that are relevant.`;
+  }
+  return `${prefix}The user sent this from their phone. Full text is at ${jobFile} — read it first.${attachments}\nWhen finished, summarize what you did/found.`;
+}
+
+// Sanitize a phone-supplied filename before it is written to the runner's OWN filesystem. This is
+// the ONE place network-sourced data becomes a path on the runner host, so it is defended hard
+// (see the file header's SECURITY INVARIANT): take the basename only (drop any / or \ segments),
+// strip a leading dot so ".ssh" / dotfiles can't be produced, allow-list [A-Za-z0-9._-] and
+// collapse everything else to '_', cap the length, and fall back to a stable name keyed by the
+// asset id when nothing usable survives. `..` and absolute paths cannot escape the job dir because
+// the result is a single sanitized segment joined onto JOBS_DIR/<id>.
+export function safeAssetFilename(raw, assetId) {
+  const fallback = `attachment-${String(assetId || 'file').replace(/[^A-Za-z0-9._-]/g, '')}` || 'attachment';
+  if (typeof raw !== 'string' || !raw.trim()) return fallback;
+  const base = raw.split(/[/\\]/).pop() || '';
+  let cleaned = base.replace(/^\.+/, '').replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 200);
+  if (!cleaned || cleaned === '.' || cleaned === '..') return fallback;
+  return cleaned;
 }
 
 // `claude -p --output-format json`'s session_id is a UUID today, but validate by allow-listed
@@ -224,6 +245,47 @@ function writeJobFile(id, body) {
   return file;
 }
 
+// Download each attachment the phone uploaded and write it into the job dir under a SANITIZED
+// filename (see safeAssetFilename). Returns the absolute paths written, for buildPrompt to point
+// Claude at. Best-effort per asset: a single failed download is logged and skipped, never fatal to
+// the whole job (the text brainstorm is the primary payload; a missing attachment shouldn't sink
+// it). Collisions after sanitization are de-duped with a numeric prefix so two "photo.jpg" uploads
+// don't clobber each other.
+async function writeJobAssets(cfg, d) {
+  const assets = Array.isArray(d.assets) ? d.assets : [];
+  if (!assets.length) return [];
+  const dir = join(JOBS_DIR, d.id);
+  mkdirSync(dir, { recursive: true });
+  const written = [];
+  const used = new Set();
+  for (const [i, a] of assets.entries()) {
+    let name = safeAssetFilename(a.filename, a.id);
+    if (used.has(name)) name = `${i}-${name}`;
+    used.add(name);
+    const dest = join(dir, name);
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 30_000);
+    try {
+      const res = await fetch(`${cfg.url}/api/dispatches/${d.id}/asset/${a.id}`, {
+        headers: { 'x-write-token': cfg.writeToken },
+        signal: ctrl.signal,
+      });
+      if (!res.ok) {
+        log(`dispatch ${d.id}: asset ${a.id} download failed: HTTP ${res.status} — skipping`);
+        continue;
+      }
+      const buf = Buffer.from(await res.arrayBuffer());
+      writeFileSync(dest, buf);
+      written.push(dest);
+    } catch (e) {
+      log(`dispatch ${d.id}: asset ${a.id} download error: ${e.message || e} — skipping`);
+    } finally {
+      clearTimeout(t);
+    }
+  }
+  return written;
+}
+
 // Spawn `claude -p ...`, feed the prompt over stdin (see the file header's flagged assumption),
 // and collect stdout/stderr. NEVER rejects — a spawn failure resolves with a non-zero code and the
 // error in stderr, so the caller has exactly one failure path to handle either kind of failure.
@@ -311,7 +373,9 @@ async function handleDispatch(cfg, runnerConfig, d) {
   await reportStatus(cfg, d.id, { status: 'running' });
 
   const jobFile = writeJobFile(d.id, d.body);
-  const prompt = buildPrompt(target, jobFile);
+  const assetFiles = await writeJobAssets(cfg, d);
+  if (assetFiles.length) log(`dispatch ${d.id}: wrote ${assetFiles.length} attachment(s)`);
+  const prompt = buildPrompt(target, jobFile, assetFiles);
   const result = await runClaude({
     cwd: target.cwd,
     prompt,

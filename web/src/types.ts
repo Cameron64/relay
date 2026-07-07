@@ -127,6 +127,15 @@ export interface Dispatch {
   claude_session: string | null;
   result_summary: string | null;
   result_card_id: string | null;
+  assets?: DispatchAsset[];
+}
+
+// Metadata for a file the phone attached to a dispatch (mirrors src/dispatch-store.ts's
+// DispatchAssetMeta). Bytes are served separately at GET /api/dispatches/:id/asset/:aid.
+export interface DispatchAsset {
+  id: string;
+  filename: string;
+  mime: string;
 }
 
 // One entry of GET /api/dispatch-targets — an {id,label} pair a runner announced on startup. The

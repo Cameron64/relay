@@ -9,6 +9,10 @@ export function assetUrl(cardId: string, assetId: string): string {
   return `/api/cards/${cardId}/asset/${assetId}`;
 }
 
+export function dispatchAssetUrl(dispatchId: string, assetId: string): string {
+  return `/api/dispatches/${dispatchId}/asset/${assetId}`;
+}
+
 export type FeedResult =
   | { status: 'ok'; cards: Card[] }
   | { status: 'unauth' }
@@ -217,7 +221,13 @@ export async function fetchDispatchTargets(): Promise<TargetsResult> {
 
 export type ComposeResult = { status: 'ok'; dispatch: Dispatch } | { status: 'error'; error: string };
 
-export async function composeDispatch(input: { title?: string | null; body: string; target: string; resume_of?: string | null }): Promise<ComposeResult> {
+export async function composeDispatch(input: {
+  title?: string | null;
+  body: string;
+  target: string;
+  resume_of?: string | null;
+  assets?: { filename: string; mime: string; data: string }[];
+}): Promise<ComposeResult> {
   let res: Response;
   try {
     res = await api('/api/dispatches', {
