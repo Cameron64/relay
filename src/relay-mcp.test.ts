@@ -4,6 +4,8 @@
 import { test, expect, describe, afterEach } from 'bun:test';
 // @ts-ignore — zero-dep .mjs server has no .d.ts
 import { cardArgsToPayload, askArgsToPayload, choiceArgsToPayload, pageArgsToPayload, formatResponse, withPagePayload, TOOL_DEFS } from '../bin/relay-mcp.mjs';
+// @ts-ignore — zero-dep .mjs lib has no .d.ts
+import { safeFilename } from '../lib/relay-lib.mjs';
 // @ts-ignore — zero-dep .mjs has no .d.ts
 import { buildPagePayload } from '../bin/relay.mjs';
 
@@ -167,6 +169,17 @@ describe('formatResponse', () => {
     expect(r.reply).toBe('do the thing');
   });
 
+  test('reply attachments pass through as response_assets metadata (withResponseImages downloads them)', () => {
+    const response_assets = [{ id: 'a1', filename: 'shot.png', mime: 'image/png' }];
+    const r = formatResponse({ status: 'responded', response: { verdict: 'reply', note: 'see this' }, response_assets }, 'id6');
+    expect(r.response_assets).toEqual(response_assets);
+  });
+
+  test('no response_assets key when the reply carried no attachments', () => {
+    const r = formatResponse({ status: 'responded', response: { verdict: 'approved', action: 'approved', note: null } }, 'id7');
+    expect(r.response_assets).toBeUndefined();
+  });
+
   test('pending tells the caller to relay_poll the id', () => {
     const r = formatResponse({ status: 'pending' }, 'id3');
     expect(r.status).toBe('pending');
@@ -285,5 +298,29 @@ describe('TOOL_DEFS', () => {
     expect(byName.relay_page.inputSchema.properties.waitSeconds.type).toBe('number');
     expect(byName.relay_page.description).toContain('__relay');
     expect(byName.relay_page.description).toContain('submit');
+  });
+});
+
+// safeFilename (relay-lib) — the ONLY place a network-supplied reply-attachment name becomes a path
+// on this machine (the MCP writing to ~/.relay/mcp-assets). Path traversal, absolute paths, and
+// dotfiles must all be neutralized to a single safe path segment.
+describe('safeFilename', () => {
+  test('keeps an ordinary filename', () => {
+    expect(safeFilename('screenshot.png', 'a1')).toBe('screenshot.png');
+  });
+  test('strips directory components (POSIX + Windows) and absolute paths', () => {
+    expect(safeFilename('../../etc/passwd', 'a1')).toBe('passwd');
+    expect(safeFilename('..\\..\\Windows\\evil.dll', 'a1')).toBe('evil.dll');
+    expect(safeFilename('/abs/thing.png', 'a1')).toBe('thing.png');
+  });
+  test('neutralizes bare .. and leading dots (no dotfiles)', () => {
+    expect(safeFilename('..', 'a1')).toBe('attachment-a1');
+    expect(safeFilename('.ssh', 'a1')).toBe('ssh');
+  });
+  test('collapses disallowed characters and falls back when nothing survives', () => {
+    expect(safeFilename('a b.png', 'a1')).toBe('a_b.png');
+    expect(safeFilename('', 'a1')).toBe('attachment-a1');
+    expect(safeFilename('///', 'a1')).toBe('attachment-a1');
+    expect(safeFilename(null, 'x/y')).toBe('attachment-xy');
   });
 });

@@ -41,6 +41,15 @@ export type CardResponse = {
   at: string;
 };
 
+// Files the USER attached to their reply (kind "reply with an image/file"). Distinct from the
+// `assets` on a Card, which are images the AGENT sent DOWN to the phone — these travel UP with a
+// response and are surfaced to the waiting agent (the MCP downloads them to temp files). Stored in
+// their own table so a reply image never renders as if the agent had attached it to the card.
+export type ResponseAssetMeta = { id: string; filename: string; mime: string };
+
+// Decoded, size-checked reply upload ready to persist (bytes materialized) — see decodeResponseAssets.
+export type ResponseAsset = { filename: string; mime: string; bytes: Uint8Array };
+
 export type Card = {
   id: string;
   created_at: string;
@@ -66,6 +75,9 @@ export type Card = {
   expires_at: string | null;
   push_sent: boolean;
   assets: { id: string; mime: string }[];
+  // Files the user attached when they replied (empty until responded-with-attachments). Rendered
+  // back on the resolved card so the user sees what they sent; surfaced to the agent via the MCP.
+  response_assets: ResponseAssetMeta[];
   // Cheap COUNT(*) of this card's card_events, attached ONLY by getCard (single-card fetch) —
   // NEVER by listCards, so the feed payload doesn't pay for a join/subquery per card just to
   // show a thread badge nobody asked for yet (see Plan 00's "Gotchas").
@@ -101,6 +113,13 @@ export type CardEventInput = {
 // bloating the SQLite row / the SSE `card-event` broadcast.
 export const CARD_EVENT_BODY_MAX = { message: 16 * 1024, payload: 64 * 1024 } as const;
 export const CARD_EVENT_MAX_PER_CARD = 200;
+
+// Reply-attachment caps — mirror the dispatch upload path (any mime, not just images; a reply may
+// be a screenshot, a log, a PDF). Count cap matches card_assets' MAX_ASSETS.
+export const MAX_RESPONSE_ASSETS = 8;
+export const RESPONSE_ASSET_MAX_BYTES = Number(process.env.RESPONSE_ASSET_MAX_BYTES ?? 10 * 1024 * 1024); // 10 MB/file
+const RESPONSE_ASSET_FILENAME_MAX = 255;
+const RESPONSE_ASSET_MIME_MAX = 200;
 
 export type CardInput = {
   kind: string;
@@ -197,6 +216,15 @@ export function ensureCardsSchema(): void {
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
       CREATE INDEX IF NOT EXISTS idx_assets_card ON card_assets(card_id);
+      CREATE TABLE IF NOT EXISTS card_response_assets (
+        id         TEXT PRIMARY KEY,
+        card_id    TEXT NOT NULL,
+        filename   TEXT NOT NULL,
+        mime       TEXT NOT NULL,
+        bytes      BLOB NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_response_assets_card ON card_response_assets(card_id);
       CREATE TABLE IF NOT EXISTS card_events (
         card_id  TEXT NOT NULL,
         seq      INTEGER NOT NULL,
@@ -391,6 +419,7 @@ function hydrate(row: any): Card {
     expires_at: row.expires_at,
     push_sent: !!row.push_sent,
     assets: assets.map((a) => ({ id: a.id, mime: a.mime })),
+    response_assets: listResponseAssets(row.id),
   };
 }
 
@@ -474,7 +503,61 @@ export type RespondResult =
 // actually flips status from 'pending' to 'responded' — ever inserts a payload event; a losing
 // call sees `status === 'responded'` already and returns 'conflict' without touching card_events
 // at all, exactly mirroring the semantics of a losing respond(). See PageFrame.tsx's submitPayload.
-export function respondCard(id: string, input: { action: string; note?: string | null; payload?: string }): RespondResult {
+// Decode + size-check the optional inline uploads on a respond request. Mirrors dispatch-store's
+// decodeDispatchAssets: any mime (a reply may be a photo, a log, a PDF), a filename is required so
+// the MCP can materialize a sensibly-named local file for the agent, and bytes are materialized
+// here. The filename is stored UNSANITIZED — the MCP is the only thing that writes these to a
+// filesystem and it sanitizes at write time (see safeFilename in relay-lib.mjs).
+type OkAssets = { ok: true; value: ResponseAsset[] };
+type ErrAssets = { ok: false; error: string };
+export function decodeResponseAssets(raw: unknown): OkAssets | ErrAssets {
+  if (raw === undefined || raw === null) return { ok: true, value: [] };
+  if (!Array.isArray(raw)) return { ok: false, error: 'assets must be an array' };
+  if (raw.length > MAX_RESPONSE_ASSETS) return { ok: false, error: `too many assets (max ${MAX_RESPONSE_ASSETS})` };
+  const out: ResponseAsset[] = [];
+  for (const a of raw) {
+    if (typeof a !== 'object' || a === null) return { ok: false, error: 'each asset must be an object' };
+    const rec = a as Record<string, unknown>;
+    const mime = typeof rec.mime === 'string' && rec.mime.trim() ? rec.mime.trim().slice(0, RESPONSE_ASSET_MIME_MAX) : null;
+    const filename = typeof rec.filename === 'string' && rec.filename.trim() ? rec.filename.trim().slice(0, RESPONSE_ASSET_FILENAME_MAX) : null;
+    const dataB64 = typeof rec.data === 'string' ? rec.data : null;
+    if (!mime) return { ok: false, error: 'asset mime required' };
+    if (!filename) return { ok: false, error: 'asset filename required' };
+    if (!dataB64) return { ok: false, error: 'asset data (base64) required' };
+    let buf: Buffer;
+    try {
+      buf = Buffer.from(dataB64, 'base64');
+    } catch {
+      return { ok: false, error: 'invalid base64 asset' };
+    }
+    if (buf.length === 0) return { ok: false, error: 'empty asset' };
+    if (buf.length > RESPONSE_ASSET_MAX_BYTES) return { ok: false, error: `asset exceeds ${RESPONSE_ASSET_MAX_BYTES} bytes` };
+    out.push({ filename, mime, bytes: new Uint8Array(buf) });
+  }
+  return { ok: true, value: out };
+}
+
+/** Metadata for a card's reply attachments (bytes fetched separately via getResponseAsset). */
+export function listResponseAssets(cardId: string): ResponseAssetMeta[] {
+  return db
+    .query('SELECT id, filename, mime FROM card_response_assets WHERE card_id = $cid ORDER BY created_at ASC, rowid ASC')
+    .all({ $cid: cardId }) as ResponseAssetMeta[];
+}
+
+/** One reply attachment's bytes (MCP download + phone preview). Scoped by card_id. */
+export function getResponseAsset(cardId: string, assetId: string): { filename: string; mime: string; bytes: Uint8Array } | null {
+  const row = db
+    .query('SELECT filename, mime, bytes FROM card_response_assets WHERE id = $aid AND card_id = $cid')
+    .get({ $aid: assetId, $cid: cardId }) as any;
+  if (!row) return null;
+  return { filename: row.filename, mime: row.mime, bytes: row.bytes as Uint8Array };
+}
+
+export function respondCard(
+  id: string,
+  input: { action: string; note?: string | null; payload?: string },
+  assets: ResponseAsset[] = [],
+): RespondResult {
   // Reserved-namespace guard: action ids starting with '__' are internal sentinels — notably the
   // notification "Reply" button (prompt cards) posts '__reply' from an OUT-OF-DATE service worker
   // that predates this feature. They must never be recorded as a verdict. Rejecting here also makes
@@ -525,6 +608,19 @@ export function respondCard(id: string, input: { action: string; note?: string |
         $at: response.at,
       });
       event = { card_id: id, seq, role: 'user', type: 'payload', body: input.payload, at: response.at };
+    }
+    // Reply attachments persist in the SAME transaction as the verdict flip — a losing/racing
+    // respond() sees status==='responded' above and returns 'conflict' before reaching here, so a
+    // card's stored reply assets always belong to the response that actually won (mirrors payload).
+    for (const a of assets) {
+      db.query('INSERT INTO card_response_assets (id, card_id, filename, mime, bytes, created_at) VALUES ($id, $cid, $filename, $mime, $bytes, $created)').run({
+        $id: genId(),
+        $cid: id,
+        $filename: a.filename,
+        $mime: a.mime,
+        $bytes: a.bytes,
+        $created: response.at,
+      });
     }
     return { status: 'responded', response, event };
   });
@@ -605,6 +701,7 @@ export function sweepExpired(): string[] {
     const tx = db.transaction(() => {
       db.query('DELETE FROM cards WHERE expires_at IS NOT NULL AND expires_at <= $now').run({ $now: now });
       db.query('DELETE FROM card_assets WHERE card_id NOT IN (SELECT id FROM cards)').run();
+      db.query('DELETE FROM card_response_assets WHERE card_id NOT IN (SELECT id FROM cards)').run();
       db.query('DELETE FROM card_events WHERE card_id NOT IN (SELECT id FROM cards)').run();
     });
     tx();
@@ -621,6 +718,7 @@ export function pruneCards(): void {
       'DELETE FROM cards WHERE id NOT IN (SELECT id FROM cards ORDER BY created_at DESC, id DESC LIMIT $max)',
     ).run({ $max: max });
     db.query('DELETE FROM card_assets WHERE card_id NOT IN (SELECT id FROM cards)').run();
+    db.query('DELETE FROM card_response_assets WHERE card_id NOT IN (SELECT id FROM cards)').run();
     db.query('DELETE FROM card_events WHERE card_id NOT IN (SELECT id FROM cards)').run();
   });
   tx();
@@ -628,5 +726,5 @@ export function pruneCards(): void {
 
 /** Test-only: wipe all cards tables. Guarded so it can't run against a real volume by accident. */
 export function __resetForTests(): void {
-  db.exec('DELETE FROM card_assets; DELETE FROM card_events; DELETE FROM cards;');
+  db.exec('DELETE FROM card_response_assets; DELETE FROM card_assets; DELETE FROM card_events; DELETE FROM cards;');
 }

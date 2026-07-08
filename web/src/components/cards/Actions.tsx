@@ -6,6 +6,8 @@ import { copyRich } from '../../utils/clipboard';
 import { markdownToSafeHtml } from '../../utils/markdown';
 import { useFeed } from '../../store/feed';
 import { AskQuestion } from './AskQuestion';
+import { AttachFiles } from '../AttachFiles';
+import { filesToAssets } from '../../utils/files';
 import type { Card, CardButton } from '../../types';
 
 // Map the card button's `style` to a Mantine button variant/color. Mirrors the old class mapping:
@@ -31,11 +33,20 @@ export function Actions({ card }: { card: Card }) {
   const applyResolved = useFeed((s) => s.applyResolved);
   const [noteFor, setNoteFor] = useState<CardButton | null>(null);
   const [noteText, setNoteText] = useState('');
+  const [noteFiles, setNoteFiles] = useState<File[]>([]);
   const [sending, setSending] = useState(false);
 
-  const submit = async (action: string, note: string | null) => {
+  const submit = async (action: string, note: string | null, files: File[] = []) => {
     setSending(true);
-    const r = await respond(card.id, action, note);
+    let assets;
+    try {
+      assets = files.length ? await filesToAssets(files) : undefined;
+    } catch {
+      setSending(false);
+      notifications.show({ message: 'Could not read an attachment — remove it and try again' });
+      return;
+    }
+    const r = await respond(card.id, action, note, undefined, assets);
     setSending(false);
     if (r.status === 'conflict') {
       notifications.show({ message: 'Already answered' });
@@ -66,6 +77,7 @@ export function Actions({ card }: { card: Card }) {
     if (b.style === 'note') {
       setNoteFor(b);
       setNoteText('');
+      setNoteFiles([]);
     } else {
       submit(b.id, null);
     }
@@ -82,11 +94,12 @@ export function Actions({ card }: { card: Card }) {
           minRows={2}
           autoFocus
         />
+        <AttachFiles files={noteFiles} onChange={setNoteFiles} />
         <Group justify="flex-end" gap="xs">
-          <Button variant="outline" onClick={() => setNoteFor(null)} disabled={sending}>
+          <Button variant="outline" onClick={() => { setNoteFor(null); setNoteFiles([]); }} disabled={sending}>
             Cancel
           </Button>
-          <Button onClick={() => submit(noteFor.id, noteText.trim() || null)} loading={sending}>
+          <Button onClick={() => submit(noteFor.id, noteText.trim() || null, noteFiles)} loading={sending}>
             {noteFor.sendLabel || 'Send'}
           </Button>
         </Group>

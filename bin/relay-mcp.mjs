@@ -22,8 +22,10 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { pathToFileURL } from 'node:url';
-import { loadConfig, projectFromCwd, sessionIdFromEnv } from '../lib/relay-lib.mjs';
-import { createCard, pollResponse, sendNotify, getCardEvents, appendAgentEvent } from '../lib/relay-client.mjs';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { loadConfig, projectFromCwd, sessionIdFromEnv, relayDir, safeFilename } from '../lib/relay-lib.mjs';
+import { createCard, pollResponse, sendNotify, getCardEvents, appendAgentEvent, downloadResponseAsset } from '../lib/relay-client.mjs';
 import { buildCardPayload, buildChoicePayload, buildAskPayload, buildPagePayload, parseTtl, VERDICT_ALIAS } from './relay.mjs';
 
 const DEFAULT_WAIT = 50; // seconds; one bounded server long-poll, safely under a typical MCP timeout
@@ -164,14 +166,50 @@ export function formatResponse(pollResult, id) {
   }
   const r = pollResult.response || {};
   const isReply = r.verdict === 'reply'; // a prompt card's free-text answer (relay_ask)
+  const responseAssets = Array.isArray(pollResult.response_assets) ? pollResult.response_assets : [];
   return {
     status: 'answered',
     verdict: r.verdict ?? null,
     action: r.action ?? null,
     note: r.note ?? null,
     ...(isReply ? { reply: r.note ?? '' } : {}),
+    // Metadata for files the user attached to their reply; withResponseImages downloads these to
+    // local temp files and adds reply_files[]/reply_images[] with on-disk paths for the agent.
+    ...(responseAssets.length ? { response_assets: responseAssets } : {}),
     id,
   };
+}
+
+// When an answered result carries reply attachments, download each to a local temp file under
+// ~/.relay/mcp-assets/<cardId>/ and hand the agent the on-disk paths (reply_files[], plus the
+// image subset as reply_images[]). Mirrors the runner's dispatch-asset materialization. Best-effort
+// per asset: a single failed download/write is skipped, never sinking the (already-answered)
+// result — the verdict/note is what matters most. Filenames are sanitized (safeFilename) before
+// touching disk; the id-scoped subdir dedupes across cards and keeps collisions apart.
+export async function withResponseImages(cfg, formatted) {
+  if (formatted.status !== 'answered' || !Array.isArray(formatted.response_assets) || !formatted.response_assets.length) {
+    return formatted;
+  }
+  const dir = join(relayDir(), 'mcp-assets', String(formatted.id));
+  const files = [];
+  const used = new Set();
+  for (const [i, a] of formatted.response_assets.entries()) {
+    let name = safeFilename(a.filename, a.id);
+    if (used.has(name)) name = `${i}-${name}`;
+    used.add(name);
+    try {
+      const buf = await downloadResponseAsset(cfg, formatted.id, a.id);
+      mkdirSync(dir, { recursive: true });
+      const dest = join(dir, name);
+      writeFileSync(dest, buf);
+      files.push({ path: dest, filename: name, mime: a.mime });
+    } catch {
+      /* skip this asset — the answer itself is unaffected */
+    }
+  }
+  if (!files.length) return formatted;
+  const images = files.filter((f) => typeof f.mime === 'string' && f.mime.startsWith('image/'));
+  return { ...formatted, reply_files: files, ...(images.length ? { reply_images: images } : {}) };
 }
 
 // --- MCP result envelopes --------------------------------------------------
@@ -392,7 +430,7 @@ async function settle(cfg, created, waitSeconds, def) {
   const wait = resolveWait(waitSeconds, def);
   if (wait === 0) return okResult({ status: 'created', id: created.id, url: created.url });
   const res = await pollResponse(cfg, created.id, wait, 0);
-  return okResult(formatResponse(res, created.id));
+  return okResult(await withResponseImages(cfg, formatResponse(res, created.id)));
 }
 
 // A page-submit bridge (relay-roadmap Plan 05) resolves the verdict to a bare 'submit' — the
@@ -471,7 +509,7 @@ export async function handleCall(name, rawArgs) {
         // relay_poll is generic across every card kind (it doesn't know it was a relay_page call) —
         // withPagePayload is a no-op unless the verdict is 'submit', so this stays correct for
         // every other caller while still inlining the payload when resuming a relay_page wait.
-        return okResult(await withPagePayload(cfg, formatResponse(res, args.id)));
+        return okResult(await withResponseImages(cfg, await withPagePayload(cfg, formatResponse(res, args.id))));
       }
       case 'relay_reply': {
         if (!args.id) return errResult('relay_reply: id is required');

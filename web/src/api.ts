@@ -13,6 +13,10 @@ export function dispatchAssetUrl(dispatchId: string, assetId: string): string {
   return `/api/dispatches/${dispatchId}/asset/${assetId}`;
 }
 
+export function responseAssetUrl(cardId: string, assetId: string): string {
+  return `/api/cards/${cardId}/response-asset/${assetId}`;
+}
+
 export type FeedResult =
   | { status: 'ok'; cards: Card[] }
   | { status: 'unauth' }
@@ -103,13 +107,22 @@ export type RespondResult =
 // a separate postCardEvent call before respond) is load-bearing: it guarantees that a losing
 // client in a cross-tab submit race never gets its payload persisted at all, so the highest-seq
 // 'payload' row for a card is always the one that belongs to the respond() call that actually won.
-export async function respond(cardId: string, action: string, note: string | null, payload?: string): Promise<RespondResult> {
+export async function respond(
+  cardId: string,
+  action: string,
+  note: string | null,
+  payload?: string,
+  assets?: { filename: string; mime: string; data: string }[],
+): Promise<RespondResult> {
+  const bodyObj: Record<string, unknown> = { action, note };
+  if (payload !== undefined) bodyObj.payload = payload;
+  if (assets && assets.length) bodyObj.assets = assets;
   let res: Response;
   try {
     res = await api(`/api/cards/${cardId}/respond`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(payload === undefined ? { action, note } : { action, note, payload }),
+      body: JSON.stringify(bodyObj),
     });
   } catch {
     return { status: 'error' };

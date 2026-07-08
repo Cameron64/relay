@@ -11,6 +11,7 @@ import { EditableDraft } from './cards/EditableDraft';
 import { Actions } from './cards/Actions';
 import { ChoiceCard } from './cards/ChoiceCard';
 import { PromptReply } from './cards/PromptReply';
+import { ReplyAssets } from './cards/ReplyAssets';
 import { PageFrame } from './cards/PageFrame';
 import { Thread } from './cards/Thread';
 import { ResolvedBanner } from './ResolvedBanner';
@@ -116,6 +117,9 @@ export function CardView({ card }: { card: Card }) {
       ) : hasActions ? (
         <Actions card={card} />
       ) : null}
+
+      {/* Files the user attached to their reply (shown once resolved, any card kind). */}
+      {isResolved ? <ReplyAssets card={card} /> : null}
     </MCard>
   );
 }

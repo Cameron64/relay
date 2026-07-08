@@ -35,6 +35,14 @@ export interface CardResponse {
   note?: string | null;
 }
 
+// Files the user attached to their reply (mirrors src/cards-store.ts's ResponseAssetMeta). Bytes
+// served at GET /api/cards/:id/response-asset/:aid. Distinct from `Asset` (agent-sent card images).
+export interface ResponseAsset {
+  id: string;
+  filename: string;
+  mime: string;
+}
+
 export interface CardSource {
   editable?: boolean;
   sessionId?: string | null; // canonical attribution (master doc §3) — used by the Sessions dashboard
@@ -76,6 +84,7 @@ export interface Card {
   body?: string | null;
   source?: CardSource | null;
   assets?: Asset[];
+  response_assets?: ResponseAsset[];
   buttons?: CardButton[];
   options?: CardOption[];
   mermaid?: string | null;
