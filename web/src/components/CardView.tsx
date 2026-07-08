@@ -69,12 +69,12 @@ export function CardView({ card }: { card: Card }) {
       className={flash ? 'relay-flash' : undefined}
     >
       <Group justify="space-between" align="flex-start" wrap="nowrap" mb="sm">
-        <Group gap="xs" align="center">
-          <Title order={4} style={{ lineHeight: 1.2 }}>
+        <Group gap="xs" align="center" wrap="nowrap" style={{ flex: 1, minWidth: 0 }}>
+          <Title order={4} truncate style={{ lineHeight: 1.2 }}>
             {card.title}
           </Title>
           {card.kind !== 'note' ? (
-            <Badge variant="light" color="indigo" tt="lowercase">
+            <Badge variant="light" color="indigo" tt="lowercase" style={{ flexShrink: 0 }}>
               {card.kind}
             </Badge>
           ) : null}
