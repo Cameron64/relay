@@ -64,3 +64,21 @@ export async function requireWrite(c: Context, next: Next) {
   if (tokensMatch(c.req.header('x-write-token'), expected)) return next();
   return c.json({ error: 'unauthorized' }, 401);
 }
+
+// Accept EITHER the browser UI cookie/Bearer OR the machine write-token. Used only by the dispatch
+// asset route, which two callers legitimately hit: the phone (UI cookie) previewing what it just
+// uploaded, and the desktop runner (write-token) downloading the same bytes to hand to Claude. A
+// missing UI_TOKEN is not fatal here as long as WRITE_TOKEN is configured (and vice versa).
+export async function requireUiOrWrite(c: Context, next: Next) {
+  const ui = uiToken();
+  const write = writeToken();
+  if (!ui && !write) return c.json({ error: 'server not configured (UI_TOKEN/WRITE_TOKEN unset)' }, 500);
+  if (write && tokensMatch(c.req.header('x-write-token'), write)) return next();
+  if (ui) {
+    const cookie = getCookie(c, SESSION_COOKIE);
+    const authHeader = c.req.header('authorization');
+    const bearer = authHeader && authHeader.startsWith('Bearer ') ? authHeader.slice(7) : undefined;
+    if (tokensMatch(cookie, ui) || tokensMatch(bearer, ui)) return next();
+  }
+  return c.json({ error: 'unauthorized' }, 401);
+}

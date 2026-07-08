@@ -2,10 +2,11 @@
 // Plan 02). Mounted under /api in server.ts, BEFORE the serveStatic('*') catch-all (same warning
 // as routes-cards.ts: routes registered after the wildcard would be shadowed and 404).
 //
-//   POST /api/dispatches                  compose: {title?, body, target, resume_of?}   (UI)
+//   POST /api/dispatches                  compose: {title?, body, target, resume_of?, assets?} (UI)
 //   GET  /api/dispatches                  list mine (?status=&since=&limit=)             (UI)
 //   GET  /api/dispatches/next             runner long-poll for its next job (?wait=N)     (write)
 //   GET  /api/dispatches/:id              one dispatch (status screen)                    (UI)
+//   GET  /api/dispatches/:id/asset/:aid   attachment bytes (phone preview + runner)   (UI|write)
 //   POST /api/dispatches/:id/cancel       queued -> cancelled only (see cancelDispatch)    (UI)
 //   POST /api/dispatches/:id/claim        atomic claim; changes=0 -> conflict              (write)
 //   POST /api/dispatches/:id/status       running|done|failed, legal transitions only      (write)
@@ -20,7 +21,7 @@
 
 import { Hono } from 'hono';
 import * as dispatch from './dispatch-store.ts';
-import { requireUi, requireWrite } from './session.ts';
+import { requireUi, requireWrite, requireUiOrWrite } from './session.ts';
 import { waitForDispatch, notifyDispatchWaiters } from './dispatch-waiters.ts';
 import { broadcast } from './stream.ts';
 import { isPushConfigured, sendPushToAll } from './push.ts';
@@ -43,7 +44,9 @@ dispatchRoutes.post('/dispatches', requireUi, async (c) => {
   }
   const v = dispatch.validateDispatchInput(body);
   if (!v.ok) return c.json({ error: v.error }, 400);
-  const created = dispatch.createDispatch(v.value);
+  const decoded = dispatch.decodeDispatchAssets((body as any)?.assets);
+  if (!decoded.ok) return c.json({ error: decoded.error }, decoded.error.includes('exceeds') ? 413 : 400);
+  const created = dispatch.createDispatch(v.value, decoded.value);
   if (!created.ok) return c.json({ error: created.error }, 400);
   notifyDispatchWaiters();
   await broadcast('dispatch-updated', created.value);
@@ -88,6 +91,19 @@ dispatchRoutes.get('/dispatches/:id', requireUi, (c) => {
   const d = dispatch.getDispatch(c.req.param('id') as string);
   if (!d) return c.json({ error: 'not found' }, 404);
   return c.json({ dispatch: d });
+});
+
+// --- attachment bytes (UI preview + runner download) ------------------------
+// requireUiOrWrite: the phone (UI cookie) previews its own upload; the desktop runner (write
+// token) downloads the same bytes to materialize a local file for Claude. `:id/asset/:aid` has
+// more path segments than `:id`, so it can't be shadowed by the one-dispatch route above.
+dispatchRoutes.get('/dispatches/:id/asset/:aid', requireUiOrWrite, (c) => {
+  if (!dispatch.dispatchReady()) return notReady(c);
+  const asset = dispatch.getDispatchAsset(c.req.param('id') as string, c.req.param('aid') as string);
+  if (!asset) return c.json({ error: 'not found' }, 404);
+  return new Response(asset.bytes, {
+    headers: { 'Content-Type': asset.mime, 'Cache-Control': 'private, max-age=86400' },
+  });
 });
 
 // --- cancel (UI side) --------------------------------------------------------

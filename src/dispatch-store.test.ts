@@ -8,6 +8,10 @@ import {
   validateDispatchInput,
   validateStatusUpdate,
   validateTargetsInput,
+  decodeDispatchAssets,
+  getDispatchAsset,
+  MAX_DISPATCH_ASSETS,
+  DISPATCH_ASSET_MAX_BYTES,
   createDispatch,
   getDispatch,
   listDispatches,
@@ -348,5 +352,103 @@ describe('pruneDispatches — retention', () => {
     pruneDispatches();
     expect(getDispatch(old.id)).toBeNull();
     expect(getDispatch(recent.id)).not.toBeNull();
+  });
+});
+
+// --- attachments (phone -> runner upload) ----------------------------------
+
+const B64_HI = Buffer.from('hi').toString('base64'); // small, non-empty payload
+
+describe('decodeDispatchAssets', () => {
+  test('returns [] for undefined/null (no assets is legal)', () => {
+    const a = decodeDispatchAssets(undefined);
+    const b = decodeDispatchAssets(null);
+    expect(a.ok && a.value).toEqual([]);
+    expect(b.ok && b.value).toEqual([]);
+  });
+
+  test('decodes a valid asset to bytes', () => {
+    const r = decodeDispatchAssets([{ filename: 'note.txt', mime: 'text/plain', data: B64_HI }]);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.value).toHaveLength(1);
+      expect(r.value[0].filename).toBe('note.txt');
+      expect(r.value[0].mime).toBe('text/plain');
+      expect(Buffer.from(r.value[0].bytes).toString('utf8')).toBe('hi');
+    }
+  });
+
+  test('accepts a non-image mime (files, not just pictures)', () => {
+    const r = decodeDispatchAssets([{ filename: 'a.pdf', mime: 'application/pdf', data: B64_HI }]);
+    expect(r.ok).toBe(true);
+  });
+
+  test('rejects a non-array', () => {
+    expect(decodeDispatchAssets('nope').ok).toBe(false);
+  });
+
+  test('rejects more than the max count', () => {
+    const many = Array.from({ length: MAX_DISPATCH_ASSETS + 1 }, (_, i) => ({ filename: `f${i}`, mime: 'text/plain', data: B64_HI }));
+    const r = decodeDispatchAssets(many);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toContain('too many');
+  });
+
+  test('rejects a missing filename or mime', () => {
+    expect(decodeDispatchAssets([{ mime: 'text/plain', data: B64_HI }]).ok).toBe(false);
+    expect(decodeDispatchAssets([{ filename: 'x', data: B64_HI }]).ok).toBe(false);
+  });
+
+  test('rejects missing/empty data', () => {
+    expect(decodeDispatchAssets([{ filename: 'x', mime: 'text/plain' }]).ok).toBe(false);
+    expect(decodeDispatchAssets([{ filename: 'x', mime: 'text/plain', data: '' }]).ok).toBe(false);
+  });
+
+  test('rejects an oversized asset with an "exceeds" error (route maps that to 413)', () => {
+    const big = Buffer.alloc(DISPATCH_ASSET_MAX_BYTES + 1, 0x41).toString('base64');
+    const r = decodeDispatchAssets([{ filename: 'big.bin', mime: 'application/octet-stream', data: big }]);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toContain('exceeds');
+  });
+});
+
+describe('createDispatch with assets', () => {
+  test('persists assets, hydrates metadata (no bytes), and serves bytes via getDispatchAsset', () => {
+    const v = validateDispatchInput({ body: 'see attached', target: 't1' });
+    if (!v.ok) throw new Error(v.error);
+    const decoded = decodeDispatchAssets([
+      { filename: 'photo.png', mime: 'image/png', data: B64_HI },
+      { filename: 'log.txt', mime: 'text/plain', data: Buffer.from('log line').toString('base64') },
+    ]);
+    if (!decoded.ok) throw new Error(decoded.error);
+    const created = createDispatch(v.value, decoded.value);
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+
+    // hydrate returns metadata only — id/filename/mime, never bytes
+    expect(created.value.assets).toHaveLength(2);
+    expect(created.value.assets[0]).toMatchObject({ filename: 'photo.png', mime: 'image/png' });
+    expect(created.value.assets[0].id).toBeTruthy();
+    expect((created.value.assets[0] as any).bytes).toBeUndefined();
+
+    // getDispatch round-trips the same metadata
+    const fetched = getDispatch(created.value.id);
+    expect(fetched?.assets).toHaveLength(2);
+
+    // bytes fetched separately, scoped by dispatch id
+    const aid = created.value.assets[1].id;
+    const bytes = getDispatchAsset(created.value.id, aid);
+    expect(bytes?.filename).toBe('log.txt');
+    expect(Buffer.from(bytes!.bytes).toString('utf8')).toBe('log line');
+
+    // wrong dispatch id must not dereference a real asset id
+    expect(getDispatchAsset('someone-elses-dispatch', aid)).toBeNull();
+  });
+
+  test('a dispatch with no assets hydrates to an empty array', () => {
+    const v = validateDispatchInput({ body: 'plain', target: 't1' });
+    if (!v.ok) throw new Error(v.error);
+    const created = createDispatch(v.value);
+    expect(created.ok && created.value.assets).toEqual([]);
   });
 });

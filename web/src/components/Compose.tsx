@@ -1,9 +1,34 @@
 import { useEffect, useState } from 'react';
-import { Button, Modal, Select, Stack, Textarea, TextInput } from '@mantine/core';
+import { ActionIcon, Button, FileButton, Group, Modal, Select, Stack, Text, Textarea, TextInput } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { composeDispatch, fetchDispatchTargets } from '../api';
 import { useFeed } from '../store/feed';
 import type { DispatchTarget } from '../types';
+
+// Attachment caps — mirror src/dispatch-store.ts (MAX_DISPATCH_ASSETS / DISPATCH_ASSET_MAX_BYTES).
+// Enforced client-side for immediate feedback; the server re-enforces regardless.
+const MAX_FILES = 8;
+const MAX_FILE_BYTES = 10 * 1024 * 1024; // 10 MB
+
+// Read a File into base64 (no data: prefix) for the compose payload's assets[].data field.
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error ?? new Error('read failed'));
+    reader.onload = () => {
+      const result = String(reader.result);
+      const comma = result.indexOf(',');
+      resolve(comma >= 0 ? result.slice(comma + 1) : result);
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+function humanSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
 
 // The "+" compose view (relay-roadmap Plan 02) — the phone's half of the bridge. A long brainstorm
 // with NO Claude session open, a target picker, and Send; the desktop runner (bin/relay-runner.mjs)
@@ -37,6 +62,7 @@ export function Compose({
   const [body, setBody] = useState('');
   const [target, setTarget] = useState<string | null>(lockedTarget);
   const [targets, setTargets] = useState<DispatchTarget[]>([]);
+  const [files, setFiles] = useState<File[]>([]);
   const [busy, setBusy] = useState(false);
   const upsertDispatch = useFeed((s) => s.upsertDispatch);
 
@@ -44,6 +70,7 @@ export function Compose({
   useEffect(() => {
     if (!opened) return;
     setTarget(lockedTarget);
+    setFiles([]); // attachments aren't mirrored to the draft (too large) — start each open clean
     (async () => {
       const r = await fetchDispatchTargets();
       if (r.status === 'ok') setTargets(r.targets);
@@ -74,14 +101,54 @@ export function Compose({
     localStorage.setItem(draftKey(resumeOf), JSON.stringify({ title, body }));
   }, [opened, resumeOf, title, body]);
 
+  // Add newly-picked files, rejecting oversized ones and enforcing the count cap. FileButton hands
+  // us the full current selection each time, so we append + de-dupe by name+size rather than replace.
+  const addFiles = (picked: File[]) => {
+    if (!picked.length) return;
+    const tooBig = picked.filter((f) => f.size > MAX_FILE_BYTES);
+    if (tooBig.length) {
+      notifications.show({ message: `Too large (max ${humanSize(MAX_FILE_BYTES)}): ${tooBig.map((f) => f.name).join(', ')}` });
+    }
+    const ok = picked.filter((f) => f.size <= MAX_FILE_BYTES);
+    setFiles((prev) => {
+      const merged = [...prev];
+      for (const f of ok) {
+        if (!merged.some((e) => e.name === f.name && e.size === f.size)) merged.push(f);
+      }
+      if (merged.length > MAX_FILES) {
+        notifications.show({ message: `At most ${MAX_FILES} files — keeping the first ${MAX_FILES}` });
+      }
+      return merged.slice(0, MAX_FILES);
+    });
+  };
+
+  const removeFile = (idx: number) => setFiles((prev) => prev.filter((_, i) => i !== idx));
+
   const submit = async () => {
     if (!body.trim() || !target) return;
     setBusy(true);
+    let assets: { filename: string; mime: string; data: string }[] | undefined;
+    try {
+      assets = files.length
+        ? await Promise.all(
+            files.map(async (f) => ({
+              filename: f.name,
+              mime: f.type || 'application/octet-stream',
+              data: await fileToBase64(f),
+            })),
+          )
+        : undefined;
+    } catch {
+      setBusy(false);
+      notifications.show({ message: 'Could not read an attachment — try removing it and resending' });
+      return;
+    }
     const r = await composeDispatch({
       title: title.trim() || null,
       body,
       target,
       resume_of: resumeOf,
+      assets,
     });
     setBusy(false);
     if (r.status === 'error') {
@@ -93,6 +160,7 @@ export function Compose({
     localStorage.removeItem(draftKey(resumeOf));
     setTitle('');
     setBody('');
+    setFiles([]);
     notifications.show({ message: 'Sent — the runner will pick it up' });
     onClose();
   };
@@ -116,6 +184,35 @@ export function Compose({
           placeholder="Paste or type as much as you want — this goes straight to a Claude session on your desktop."
           autoFocus
         />
+        <Stack gap="xs">
+          <Group gap="xs">
+            <FileButton onChange={addFiles} accept="image/*,*/*" multiple>
+              {(props) => (
+                <Button {...props} variant="light" size="xs" disabled={files.length >= MAX_FILES}>
+                  Attach files
+                </Button>
+              )}
+            </FileButton>
+            {files.length > 0 && (
+              <Text size="xs" c="dimmed">
+                {files.length}/{MAX_FILES}
+              </Text>
+            )}
+          </Group>
+          {files.map((f, i) => (
+            <Group key={`${f.name}-${f.size}-${i}`} gap="xs" wrap="nowrap" justify="space-between">
+              <Text size="sm" truncate style={{ flex: 1 }}>
+                {f.name}
+              </Text>
+              <Text size="xs" c="dimmed">
+                {humanSize(f.size)}
+              </Text>
+              <ActionIcon variant="subtle" color="gray" size="sm" onClick={() => removeFile(i)} aria-label={`Remove ${f.name}`}>
+                ✕
+              </ActionIcon>
+            </Group>
+          ))}
+        </Stack>
         <Select
           label="Target"
           placeholder="Where should this run?"

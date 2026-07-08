@@ -1,7 +1,7 @@
 import { useState } from 'react';
-import { Badge, Button, Card as MCard, Group, Text, Title } from '@mantine/core';
+import { Anchor, Badge, Button, Card as MCard, Group, Image, Text, Title } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
-import { cancelDispatch } from '../api';
+import { cancelDispatch, dispatchAssetUrl } from '../api';
 import { useFeed } from '../store/feed';
 import { timeAgo } from '../utils/markdown';
 import { scrollToCard } from '../utils/focus';
@@ -70,6 +70,22 @@ export function DispatchItem({ dispatch, onFollowUp }: { dispatch: Dispatch; onF
       <Text size="sm" c="dimmed" lineClamp={4} mb="sm">
         {dispatch.body}
       </Text>
+
+      {dispatch.assets?.length ? (
+        <Group gap="xs" mb="sm" wrap="wrap">
+          {dispatch.assets.map((a) =>
+            a.mime.startsWith('image/') ? (
+              <Anchor key={a.id} href={dispatchAssetUrl(dispatch.id, a.id)} target="_blank" rel="noreferrer">
+                <Image src={dispatchAssetUrl(dispatch.id, a.id)} alt={a.filename} h={64} w={64} fit="cover" radius="sm" />
+              </Anchor>
+            ) : (
+              <Anchor key={a.id} href={dispatchAssetUrl(dispatch.id, a.id)} target="_blank" rel="noreferrer" size="xs">
+                📎 {a.filename}
+              </Anchor>
+            ),
+          )}
+        </Group>
+      ) : null}
 
       {dispatch.result_summary ? (
         <Text size="sm" mb="sm">
