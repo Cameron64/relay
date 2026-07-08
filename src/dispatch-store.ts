@@ -234,7 +234,7 @@ export function validateTargetsInput(body: unknown): Ok<{ host: string; targets:
 
 function hydrate(row: any): Dispatch {
   const assets = db
-    .query('SELECT id, filename, mime FROM dispatch_assets WHERE dispatch_id = $id ORDER BY created_at ASC, id ASC')
+    .query('SELECT id, filename, mime FROM dispatch_assets WHERE dispatch_id = $id ORDER BY created_at ASC, rowid ASC')
     .all({ $id: row.id }) as any[];
   return {
     id: row.id,

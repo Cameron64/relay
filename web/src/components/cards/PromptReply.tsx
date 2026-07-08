@@ -3,6 +3,8 @@ import { Button, Group, Stack, Textarea } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { respond, postCardEvent } from '../../api';
 import { useFeed } from '../../store/feed';
+import { AttachFiles } from '../AttachFiles';
+import { filesToAssets } from '../../utils/files';
 import type { Card } from '../../types';
 
 // kind: 'prompt' — an open-ended question that wants a FREE-TEXT reply (created by `relay ask`).
@@ -20,6 +22,7 @@ export function PromptReply({ card, autoFocus = false }: { card: Card; autoFocus
   const applyResolved = useFeed((s) => s.applyResolved);
   const appendEvent = useFeed((s) => s.appendEvent);
   const [text, setText] = useState('');
+  const [files, setFiles] = useState<File[]>([]);
   const [sending, setSending] = useState(false);
   const [asking, setAsking] = useState(false);
   const placeholder =
@@ -29,9 +32,18 @@ export function PromptReply({ card, autoFocus = false }: { card: Card; autoFocus
 
   const send = async () => {
     const reply = text.trim();
-    if (!reply || sending) return;
+    // A reply may be text-only, an image/file only, or both — allow send when EITHER is present.
+    if ((!reply && !files.length) || sending) return;
     setSending(true);
-    const r = await respond(card.id, 'reply', reply);
+    let assets;
+    try {
+      assets = files.length ? await filesToAssets(files) : undefined;
+    } catch {
+      setSending(false);
+      notifications.show({ message: 'Could not read an attachment — remove it and try again' });
+      return;
+    }
+    const r = await respond(card.id, 'reply', reply || null, undefined, assets);
     setSending(false);
     if (r.status === 'conflict') {
       notifications.show({ message: 'Already answered' });
@@ -42,6 +54,7 @@ export function PromptReply({ card, autoFocus = false }: { card: Card; autoFocus
       notifications.show({ message: 'Could not send' });
       return;
     }
+    setFiles([]);
     applyResolved(card.id, r.response);
     notifications.show({ message: 'Reply sent' });
   };
@@ -83,11 +96,18 @@ export function PromptReply({ card, autoFocus = false }: { card: Card; autoFocus
           }
         }}
       />
+      <AttachFiles files={files} onChange={setFiles} />
       <Group justify="flex-end" gap="xs">
-        <Button variant="outline" onClick={() => void sendAsQuestion()} loading={asking} disabled={!text.trim() || sending}>
+        <Button
+          variant="outline"
+          onClick={() => void sendAsQuestion()}
+          loading={asking}
+          disabled={!text.trim() || sending || files.length > 0}
+          title={files.length > 0 ? 'Attachments send with the reply, not a question' : undefined}
+        >
           Send as question
         </Button>
-        <Button onClick={() => void send()} loading={sending} disabled={!text.trim() || asking}>
+        <Button onClick={() => void send()} loading={sending} disabled={(!text.trim() && !files.length) || asking}>
           Send reply
         </Button>
       </Group>

@@ -7,7 +7,7 @@
 //   POST /api/cards                   Claude creates a card (+optional push)   (write)
 //   GET  /api/cards                   feed, newest first                       (UI)
 //   GET  /api/cards/:id               one card                                 (UI)
-//   POST /api/cards/:id/respond       record verdict, resolve --wait + SSE     (UI)
+//   POST /api/cards/:id/respond       record verdict (+optional assets[]), resolve --wait + SSE (UI)
 //   POST /api/cards/:id/dismiss       clear a card from the feed               (UI)
 //   GET  /api/cards/:id/response      long-poll the verdict (?wait=N&events_since=SEQ) (write)
 //   POST /api/cards/:id/events        append a thread event, role:'user'       (UI)
@@ -15,6 +15,7 @@
 //   POST /api/cards/:id/agent-events  append a thread event, role:'agent'      (write)
 //   GET  /api/cards/:id/agent-events  list/long-poll events (?since_seq&wait)  (write)
 //   GET  /api/cards/:id/asset/:aid    image bytes                              (UI)
+//   GET  /api/cards/:id/response-asset/:aid  reply-attachment bytes         (UI|write)
 //   GET  /api/sessions                dashboard rows folded from notify-log     (UI)
 //
 // The events endpoints are deliberately split into a UI path and a write path (rather than one
@@ -29,7 +30,7 @@
 import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { streamSSE } from 'hono/streaming';
-import { requireUi, requireWrite, handleUnlock } from './session.ts';
+import { requireUi, requireWrite, requireUiOrWrite, handleUnlock } from './session.ts';
 import * as cards from './cards-store.ts';
 import * as dispatch from './dispatch-store.ts';
 import { isPushConfigured, sendPushToAll } from './push.ts';
@@ -275,7 +276,12 @@ appRoutes.post('/cards/:id/respond', requireUi, async (c) => {
     payload = v.value.body;
   }
 
-  const result = cards.respondCard(id, { action, note, payload });
+  // Optional reply attachments (images/files the user sends back with their answer). Decoded +
+  // size-checked here, then persisted atomically with the verdict flip inside respondCard.
+  const decoded = cards.decodeResponseAssets(body?.assets);
+  if (!decoded.ok) return c.json({ error: decoded.error }, decoded.error.includes('exceeds') ? 413 : 400);
+
+  const result = cards.respondCard(id, { action, note, payload }, decoded.value);
   if (result.status === 'notfound') return c.json({ error: 'not found' }, 404);
   // Reserved sentinel (e.g. '__reply' from a stale SW) — reject so the old SW falls back to opening
   // the app at the reply composer instead of recording a junk verdict. See respondCard's guard.
@@ -325,10 +331,14 @@ appRoutes.get('/cards/:id/response', requireWrite, async (c) => {
   const sinceSeq = sinceParam !== undefined ? Math.max(0, Math.floor(Number(sinceParam)) || 0) : undefined;
 
   if (card.status === 'responded') {
+    // response_assets: metadata for any files the user attached to their reply. The MCP downloads
+    // the bytes to temp files and hands the paths to the waiting agent. Always included (empty
+    // array when none) so the client can branch on presence without a separate call.
+    const response_assets = card.response_assets;
     return c.json(
       sinceSeq === undefined
-        ? { status: 'responded', response: card.response }
-        : { status: 'responded', response: card.response, events: cards.listCardEvents(id) },
+        ? { status: 'responded', response: card.response, response_assets }
+        : { status: 'responded', response: card.response, response_assets, events: cards.listCardEvents(id) },
     );
   }
   // Dismissed cards are marked for deletion (expires_at set) but linger until the next
@@ -483,6 +493,19 @@ appRoutes.get('/cards/:id/agent-events', requireWrite, eventsGetHandler());
 appRoutes.get('/cards/:id/asset/:aid', requireUi, (c) => {
   if (!cards.cardsReady()) return notReady(c);
   const a = cards.getAsset(c.req.param('id') as string, c.req.param('aid') as string);
+  if (!a) return c.json({ error: 'not found' }, 404);
+  return new Response(a.bytes, {
+    headers: { 'Content-Type': a.mime, 'Cache-Control': 'private, max-age=86400' },
+  });
+});
+
+// --- reply-attachment bytes (UI preview + MCP download) --------------------
+// requireUiOrWrite: the phone (UI cookie) renders the reply image back on the resolved card; the
+// agent's MCP (write token) downloads it to a temp file. Distinct route from /asset/:aid above so
+// agent-sent card images and user-sent reply images never share an addressing space.
+appRoutes.get('/cards/:id/response-asset/:aid', requireUiOrWrite, (c) => {
+  if (!cards.cardsReady()) return notReady(c);
+  const a = cards.getResponseAsset(c.req.param('id') as string, c.req.param('aid') as string);
   if (!a) return c.json({ error: 'not found' }, 404);
   return new Response(a.bytes, {
     headers: { 'Content-Type': a.mime, 'Cache-Control': 'private, max-age=86400' },

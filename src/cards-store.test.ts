@@ -15,6 +15,11 @@ import {
   dismissCard,
   sweepExpired,
   getAsset,
+  decodeResponseAssets,
+  getResponseAsset,
+  listResponseAssets,
+  MAX_RESPONSE_ASSETS,
+  RESPONSE_ASSET_MAX_BYTES,
   pruneCards,
   validateCardEventInput,
   appendCardEvent,
@@ -549,5 +554,114 @@ describe('pruneCards', () => {
     expect(getCard('c3')).not.toBeNull(); // newest kept
     process.env.CARD_RETENTION_DAYS = '30';
     process.env.CARD_MAX = '500';
+  });
+});
+
+// --- reply attachments (user replies to a card WITH an image/file) ---------
+
+const RB64 = Buffer.from('reply-bytes').toString('base64');
+
+describe('decodeResponseAssets', () => {
+  test('undefined/null -> [] (assets are optional)', () => {
+    expect(decodeResponseAssets(undefined)).toEqual({ ok: true, value: [] });
+    expect(decodeResponseAssets(null)).toEqual({ ok: true, value: [] });
+  });
+
+  test('decodes a valid asset to bytes', () => {
+    const r = decodeResponseAssets([{ filename: 'shot.png', mime: 'image/png', data: RB64 }]);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.value[0].filename).toBe('shot.png');
+      expect(Buffer.from(r.value[0].bytes).toString('utf8')).toBe('reply-bytes');
+    }
+  });
+
+  test('accepts a non-image mime (files, not just pictures)', () => {
+    expect(decodeResponseAssets([{ filename: 'a.pdf', mime: 'application/pdf', data: RB64 }]).ok).toBe(true);
+  });
+
+  test('rejects a non-array, missing filename/mime/data, and empty data', () => {
+    expect(decodeResponseAssets('nope').ok).toBe(false);
+    expect(decodeResponseAssets([{ mime: 'image/png', data: RB64 }]).ok).toBe(false);
+    expect(decodeResponseAssets([{ filename: 'x', data: RB64 }]).ok).toBe(false);
+    expect(decodeResponseAssets([{ filename: 'x', mime: 'image/png' }]).ok).toBe(false);
+    expect(decodeResponseAssets([{ filename: 'x', mime: 'image/png', data: '' }]).ok).toBe(false);
+  });
+
+  test('rejects more than the max count', () => {
+    const many = Array.from({ length: MAX_RESPONSE_ASSETS + 1 }, (_, i) => ({ filename: `f${i}`, mime: 'image/png', data: RB64 }));
+    const r = decodeResponseAssets(many);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toContain('too many');
+  });
+
+  test('rejects an oversized asset with an "exceeds" error (route -> 413)', () => {
+    const big = Buffer.alloc(RESPONSE_ASSET_MAX_BYTES + 1, 0x41).toString('base64');
+    const r = decodeResponseAssets([{ filename: 'big.bin', mime: 'application/octet-stream', data: big }]);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toContain('exceeds');
+  });
+});
+
+describe('respondCard with reply attachments', () => {
+  function askCard() {
+    return createCard(input({ kind: 'prompt', title: 'send me a screenshot', expects_response: true }));
+  }
+
+  test('persists assets, hydrates metadata (no bytes), serves bytes scoped by card', () => {
+    const card = askCard();
+    const decoded = decodeResponseAssets([
+      { filename: 'screen.png', mime: 'image/png', data: RB64 },
+      { filename: 'notes.txt', mime: 'text/plain', data: Buffer.from('hi').toString('base64') },
+    ]);
+    if (!decoded.ok) throw new Error(decoded.error);
+    const r = respondCard(card.id, { action: 'reply', note: 'here you go' }, decoded.value);
+    expect(r.status).toBe('responded');
+
+    // hydrate exposes metadata only
+    const fetched = getCard(card.id)!;
+    expect(fetched.response_assets).toHaveLength(2);
+    expect(fetched.response_assets[0]).toMatchObject({ filename: 'screen.png', mime: 'image/png' });
+    expect(fetched.response_assets[0].id).toBeTruthy();
+    expect((fetched.response_assets[0] as any).bytes).toBeUndefined();
+    expect(listResponseAssets(card.id)).toHaveLength(2);
+
+    // bytes fetched separately, scoped by card id
+    const aid = fetched.response_assets[1].id;
+    const bytes = getResponseAsset(card.id, aid);
+    expect(bytes?.filename).toBe('notes.txt');
+    expect(Buffer.from(bytes!.bytes).toString('utf8')).toBe('hi');
+    expect(getResponseAsset('someone-elses-card', aid)).toBeNull();
+  });
+
+  test('a reply with no attachments hydrates response_assets to []', () => {
+    const card = askCard();
+    respondCard(card.id, { action: 'reply', note: 'text only' });
+    expect(getCard(card.id)!.response_assets).toEqual([]);
+  });
+
+  test('a losing (already-responded) respondCard never writes its attachments', () => {
+    const card = askCard();
+    const winner = decodeResponseAssets([{ filename: 'win.png', mime: 'image/png', data: RB64 }]);
+    const loser = decodeResponseAssets([{ filename: 'lose.png', mime: 'image/png', data: RB64 }]);
+    if (!winner.ok || !loser.ok) throw new Error('decode');
+    expect(respondCard(card.id, { action: 'reply', note: 'first' }, winner.value).status).toBe('responded');
+    expect(respondCard(card.id, { action: 'reply', note: 'second' }, loser.value).status).toBe('conflict');
+    const assets = listResponseAssets(card.id);
+    expect(assets).toHaveLength(1);
+    expect(assets[0].filename).toBe('win.png');
+  });
+
+  test('sweepExpired reaps a resolved card\'s reply attachments', () => {
+    const card = askCard();
+    const decoded = decodeResponseAssets([{ filename: 'x.png', mime: 'image/png', data: RB64 }]);
+    if (!decoded.ok) throw new Error(decoded.error);
+    respondCard(card.id, { action: 'reply', note: 'bye' }, decoded.value);
+    const aid = getCard(card.id)!.response_assets[0].id;
+    // force-expire and sweep
+    db.query("UPDATE cards SET expires_at = datetime('now','-1 hour') WHERE id = $id").run({ $id: card.id });
+    sweepExpired();
+    expect(getCard(card.id)).toBeNull();
+    expect(getResponseAsset(card.id, aid)).toBeNull();
   });
 });
