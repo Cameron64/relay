@@ -1,4 +1,5 @@
-import { ActionIcon, Box, Button, Group, Text, Tooltip, useComputedColorScheme, useMantineColorScheme } from '@mantine/core';
+import { ActionIcon, Box, Button, Group, Menu, Text, Tooltip, useComputedColorScheme, useMantineColorScheme } from '@mantine/core';
+import { useMediaQuery } from '@mantine/hooks';
 import { usePush } from '../hooks/usePush';
 import { SessionsPanel } from './SessionsPanel';
 import type { Dispatch } from '../types';
@@ -50,34 +51,113 @@ export function TopBar({
   const computed = useComputedColorScheme('light', { getInitialValueInEffect: true });
   const push = usePush();
 
+  // Below the `sm` breakpoint the full toolbar (wide "Disable notifications" / "Sessions" /
+  // "Activity" / "Lock" text buttons) overflows the bar on a phone, so we collapse the secondary
+  // controls into a `⋯` overflow menu. Defaults to mobile until the query resolves so the first
+  // paint on a phone never flashes the spilling desktop layout.
+  const isMobile = useMediaQuery('(max-width: 48em)', true);
+
   const toggleScheme = () => setColorScheme(computed === 'dark' ? 'light' : 'dark');
 
-  return (
-    <Group justify="space-between" align="center" h={56} px="md">
-      <Group gap="xs" align="center">
-        <Box
-          w={10}
-          h={10}
-          style={{ borderRadius: '50%', background: 'var(--mantine-color-indigo-5)' }}
-        />
-        <div>
-          <Text fw={700} size="lg" style={{ lineHeight: 1.1 }}>
-            Relay
-          </Text>
-          <Text c="dimmed" style={{ fontSize: 10, lineHeight: 1.1 }}>
-            build {__BUILD_ID__}
-          </Text>
-        </div>
-      </Group>
+  const brand = (
+    <Group gap="xs" align="center" wrap="nowrap">
+      <Box
+        w={10}
+        h={10}
+        style={{ borderRadius: '50%', background: 'var(--mantine-color-indigo-5)', flexShrink: 0 }}
+      />
+      <div>
+        <Text fw={700} size="lg" style={{ lineHeight: 1.1 }}>
+          Relay
+        </Text>
+        <Text c="dimmed" style={{ fontSize: 10, lineHeight: 1.1 }}>
+          build {__BUILD_ID__}
+        </Text>
+      </div>
+    </Group>
+  );
 
-      <Group gap="xs" align="center">
-        {onCompose ? (
-          <Tooltip label="New dispatch — send a brainstorm to your desktop" openDelay={300}>
-            <ActionIcon variant="filled" color="indigo" onClick={onCompose} aria-label="New dispatch">
-              +
-            </ActionIcon>
-          </Tooltip>
-        ) : null}
+  const compose = onCompose ? (
+    <Tooltip label="New dispatch — send a brainstorm to your desktop" openDelay={300}>
+      <ActionIcon variant="filled" color="indigo" onClick={onCompose} aria-label="New dispatch">
+        +
+      </ActionIcon>
+    </Tooltip>
+  ) : null;
+
+  if (isMobile) {
+    // Compact bar: brand + primary "+" + an overflow menu holding everything else. Nothing wide
+    // ever lands directly on the bar, so it can't spill.
+    return (
+      <Group justify="space-between" align="center" mih={56} px="md" py={4} wrap="nowrap">
+        {brand}
+        <Group gap="xs" align="center" wrap="nowrap">
+          {compose}
+          <Menu position="bottom-end" shadow="md" width={220} withinPortal>
+            <Menu.Target>
+              <ActionIcon variant="subtle" aria-label="More actions">
+                ⋯
+              </ActionIcon>
+            </Menu.Target>
+            <Menu.Dropdown>
+              {push.supported ? (
+                <Menu.Item
+                  closeMenuOnClick={false}
+                  disabled={push.disabled || push.busy}
+                  onClick={() => void push.toggle()}
+                >
+                  {push.enabled ? 'Disable notifications' : 'Enable notifications'}
+                </Menu.Item>
+              ) : (
+                <Menu.Item disabled>{push.status}</Menu.Item>
+              )}
+
+              <Menu.Item closeMenuOnClick={false} onClick={toggleScheme}>
+                {computed === 'dark' ? '☀ Light theme' : '☾ Dark theme'}
+              </Menu.Item>
+
+              <Menu.Item
+                onClick={() => {
+                  void hardRefresh();
+                }}
+              >
+                ↻ Hard refresh
+              </Menu.Item>
+
+              {showLock && onFollowUp && onOpenActivity ? (
+                <>
+                  <Menu.Divider />
+                  <SessionsPanel
+                    onFollowUp={onFollowUp}
+                    onOpenActivity={onOpenActivity}
+                    trigger={(open) => <Menu.Item onClick={open}>Sessions</Menu.Item>}
+                  />
+                  <Menu.Item onClick={() => onOpenActivity()}>Activity</Menu.Item>
+                </>
+              ) : null}
+
+              {showLock ? (
+                <>
+                  <Menu.Divider />
+                  <Menu.Item color="red" onClick={onLock}>
+                    Lock — forget this device
+                  </Menu.Item>
+                </>
+              ) : null}
+            </Menu.Dropdown>
+          </Menu>
+        </Group>
+      </Group>
+    );
+  }
+
+  // Desktop / wide: the full toolbar.
+  return (
+    <Group justify="space-between" align="center" mih={56} px="md" py={4} wrap="nowrap">
+      {brand}
+
+      <Group gap="xs" align="center" wrap="nowrap">
+        {compose}
 
         {push.supported ? (
           <Tooltip label={push.status} disabled={!push.status} openDelay={300}>

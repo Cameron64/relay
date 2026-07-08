@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import type { ReactNode } from 'react';
 import {
   ActionIcon,
   Badge,
@@ -175,9 +176,13 @@ function SessionRow({
 export function SessionsPanel({
   onFollowUp,
   onOpenActivity,
+  trigger,
 }: {
   onFollowUp: (d: Dispatch) => void;
   onOpenActivity: (sessionId: string) => void;
+  // Optional custom trigger — lets the mobile overflow menu render its own Menu.Item that opens
+  // the drawer, instead of the default toolbar button. Given the drawer's `open` callback.
+  trigger?: (open: () => void) => ReactNode;
 }) {
   const [opened, { open, close }] = useDisclosure(false);
   const [state, setState] = useState<'idle' | 'loading' | 'ok' | 'warming' | 'error'>('idle');
@@ -245,11 +250,15 @@ export function SessionsPanel({
 
   return (
     <>
-      <Tooltip label="Which Claude sessions exist, and do they need you" openDelay={300}>
-        <Button variant="subtle" size="xs" color="gray" onClick={open} aria-label="Sessions">
-          Sessions
-        </Button>
-      </Tooltip>
+      {trigger ? (
+        trigger(open)
+      ) : (
+        <Tooltip label="Which Claude sessions exist, and do they need you" openDelay={300}>
+          <Button variant="subtle" size="xs" color="gray" onClick={open} aria-label="Sessions">
+            Sessions
+          </Button>
+        </Tooltip>
+      )}
 
       <Drawer
         opened={opened}
