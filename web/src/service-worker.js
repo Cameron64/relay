@@ -98,7 +98,9 @@ self.addEventListener('push', (event) => {
     self.registration.showNotification(title, {
       body: data.body || '',
       icon: '/icons/icon-192.png',
-      badge: '/icons/icon-192.png',
+      // badge is Android's monochrome status-bar icon — it must be a white-on-transparent
+      // silhouette (badge-96.png), not the full-color app icon, or Android masks it to a black box.
+      badge: '/icons/badge-96.png',
       tag: data.tag || 'relay',
       renotify: true,
       requireInteraction: !!data.requireInteraction,
@@ -138,7 +140,7 @@ async function respondInBackground(cardId, action, url) {
       await self.registration.showNotification('Relay', {
         body: 'Response sent ✓',
         icon: '/icons/icon-192.png',
-        badge: '/icons/icon-192.png',
+        badge: '/icons/badge-96.png',
         tag: cardId,
         silent: true,
       });

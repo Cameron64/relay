@@ -1,0 +1,9 @@
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Relay badge">
+  <g fill="none" stroke="#ffffff" stroke-width="26" stroke-linecap="round">
+    <path d="M315 180 A96 96 0 0 1 315 332"/>
+    <path d="M348 138 A150 150 0 0 1 348 374"/>
+    <path d="M197 180 A96 96 0 0 0 197 332"/>
+    <path d="M164 138 A150 150 0 0 0 164 374"/>
+  </g>
+  <circle cx="256" cy="256" r="36" fill="#ffffff"/>
+</svg>
