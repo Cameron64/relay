@@ -48,7 +48,10 @@ export type DispatchInput = {
   resume_of: string | null;
 };
 
-export type DispatchTarget = { id: string; label: string };
+// `host`/`updatedAt` are populated by listTargets() (the union-read side) only — a runner's POST
+// announce (validateTargetsInput/replaceTargetsForHost) still only ever sends/consumes {id,label};
+// see the security invariant above. Optional here so both call sites satisfy the same type.
+export type DispatchTarget = { id: string; label: string; host?: string; updatedAt?: string };
 
 // Metadata returned in a hydrated Dispatch (bytes are fetched separately via getDispatchAsset,
 // exactly as card_assets never ship bytes inside a hydrated Card).
@@ -431,12 +434,16 @@ export function replaceTargetsForHost(host: string, targets: DispatchTarget[]): 
 }
 
 // Union across hosts, de-duped by target id. SQLite's documented MAX()-aggregate behavior picks
-// the bare `label` column from the SAME row as the winning MAX(updated_at) for each group, so ties
-// resolve to "whichever host announced this id most recently" rather than an arbitrary row.
+// the bare `host`/`label` columns from the SAME row as the winning MAX(updated_at) for each group,
+// so ties resolve to "whichever host announced this id most recently" rather than an arbitrary
+// row — that surviving row's host + updated_at are what callers see as this target's freshness.
+// With runners now re-announcing periodically (see the runner's heartbeat), updated_at doubles as
+// a live "host last seen" signal for the compose picker's staleness UI.
 export function listTargets(): DispatchTarget[] {
-  return db
-    .query('SELECT id, label, MAX(updated_at) AS updated_at FROM dispatch_targets GROUP BY id ORDER BY label ASC')
-    .all() as DispatchTarget[];
+  const rows = db
+    .query('SELECT host, id, label, MAX(updated_at) AS updated_at FROM dispatch_targets GROUP BY id ORDER BY label ASC')
+    .all() as { host: string; id: string; label: string; updated_at: string }[];
+  return rows.map((r) => ({ id: r.id, label: r.label, host: r.host, updatedAt: r.updated_at }));
 }
 
 // --- session linkage (relay-roadmap Plan 03) ----------------------------------

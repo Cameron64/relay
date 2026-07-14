@@ -5,6 +5,30 @@ import { composeDispatch, fetchDispatchTargets } from '../api';
 import { useFeed } from '../store/feed';
 import type { DispatchTarget } from '../types';
 
+// A target is STALE once its runner hasn't re-announced within this window. Runners heartbeat
+// every 5 minutes (see bin/relay-runner.mjs), so 15 minutes tolerates a few missed beats before
+// flagging — long enough to avoid false "is it running?" scares, short enough to catch a runner
+// that's actually down.
+const STALE_TARGET_MS = 15 * 60 * 1000;
+
+function isStale(t: DispatchTarget): boolean {
+  if (!t.updatedAt) return false; // no timestamp (shouldn't happen post-migration) — don't flag
+  return Date.now() - new Date(t.updatedAt).getTime() > STALE_TARGET_MS;
+}
+
+// Coarse "3d ago" / "5m ago" relative-time for the picker description — deliberately imprecise
+// (this is a freshness hint, not a clock).
+function relativeAge(iso: string): string {
+  const ms = Date.now() - new Date(iso).getTime();
+  if (ms < 60_000) return 'just now';
+  const mins = Math.round(ms / 60_000);
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.round(hours / 24);
+  return `${days}d ago`;
+}
+
 // Attachment caps — mirror src/dispatch-store.ts (MAX_DISPATCH_ASSETS / DISPATCH_ASSET_MAX_BYTES).
 // Enforced client-side for immediate feedback; the server re-enforces regardless.
 const MAX_FILES = 8;
@@ -65,6 +89,7 @@ export function Compose({
   const [files, setFiles] = useState<File[]>([]);
   const [busy, setBusy] = useState(false);
   const upsertDispatch = useFeed((s) => s.upsertDispatch);
+  const targetsById = new Map(targets.map((t) => [t.id, t]));
 
   // Load the target list + restore any mirrored draft each time the composer opens.
   useEffect(() => {
@@ -223,7 +248,29 @@ export function Compose({
           description={lockedTarget ? 'Locked to the original session’s target' : undefined}
           searchable
           nothingFoundMessage="No runner has announced any targets yet"
+          renderOption={({ option, checked }) => {
+            const t = targetsById.get(option.value);
+            const stale = t ? isStale(t) : false;
+            return (
+              <Group flex="1" gap="xs" justify="space-between" wrap="nowrap">
+                <Text size="sm" c={stale ? 'dimmed' : undefined} style={{ flex: 1 }} truncate>
+                  {option.label}
+                </Text>
+                {t?.host && (
+                  <Text size="xs" c="dimmed" truncate>
+                    {stale && t.updatedAt ? `${t.host} · seen ${relativeAge(t.updatedAt)}` : t.host}
+                  </Text>
+                )}
+                {checked && <Text size="xs">✓</Text>}
+              </Group>
+            );
+          }}
         />
+        {!lockedTarget && targets.length > 0 && targets.every(isStale) && (
+          <Text size="xs" c="dimmed">
+            No runner has announced recently — is your runner running?
+          </Text>
+        )}
         <Button onClick={submit} loading={busy} disabled={!body.trim() || !target}>
           Send
         </Button>

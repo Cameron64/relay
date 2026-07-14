@@ -335,6 +335,29 @@ describe('targets', () => {
     const ids = listTargets().map((t) => t.id).sort();
     expect(ids).toEqual(['only-host2', 'shared']);
   });
+
+  test('listTargets returns host + updatedAt (ISO string) alongside id/label', () => {
+    replaceTargetsForHost('host1', [{ id: 'a', label: 'A' }]);
+    const [t] = listTargets();
+    expect(t.id).toBe('a');
+    expect(t.label).toBe('A');
+    expect(t.host).toBe('host1');
+    expect(typeof t.updatedAt).toBe('string');
+    expect(new Date(t.updatedAt!).toString()).not.toBe('Invalid Date');
+  });
+
+  test('listTargets picks host/label from the SAME row as the winning MAX(updated_at)', () => {
+    // host2 announces 'shared' strictly after host1 — the surviving row (host, label, updatedAt)
+    // must all come from host2's row, not a mix of host1's label with host2's timestamp. Backdate
+    // host1's row explicitly (rather than relying on wall-clock ordering between two calls) so the
+    // MAX(updated_at) winner is deterministic.
+    replaceTargetsForHost('host1', [{ id: 'shared', label: 'from host1' }]);
+    db.query("UPDATE dispatch_targets SET updated_at = '2020-01-01T00:00:00.000Z' WHERE host = 'host1'").run();
+    replaceTargetsForHost('host2', [{ id: 'shared', label: 'from host2' }]);
+    const [t] = listTargets();
+    expect(t.host).toBe('host2');
+    expect(t.label).toBe('from host2');
+  });
 });
 
 describe('pruneDispatches — retention', () => {
