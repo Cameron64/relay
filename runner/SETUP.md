@@ -63,6 +63,14 @@ You should see `relay-runner starting — host="..." targets=[...]` and an "anno
 line on stderr. Leave it running, then from the phone (or `curl`) compose a dispatch and watch it
 get claimed within a few seconds. Ctrl+C to stop.
 
+The runner re-announces its targets every 5 minutes for as long as it runs (so the phone's target
+list self-heals if the server's database is ever wiped/redeployed), and retries sooner (every 30s)
+if an announce attempt fails, falling back to the 5-minute cadence once one succeeds. It also
+watches `runner.json` for changes and reloads it automatically — edit the file, save it, and within
+about half a second the runner picks up the new target list and re-announces immediately. An
+invalid edit (bad JSON, missing fields) is logged as a warning and the previous config keeps
+running untouched.
+
 ## 4. Install it to start automatically on login (Windows)
 
 ```bat
@@ -82,7 +90,10 @@ To start it right now without logging out again, double-click `runner\start-hidd
   missing/invalid (the runner refuses to start and logs why) or the write token not matching the
   server's `WRITE_TOKEN`.
 - **"unknown target" failures**: the phone's compose picker only shows targets THIS runner most
-  recently announced (`POST /api/dispatch-targets` on startup) — if you edited `runner.json`,
-  restart the runner so the new target list gets pushed.
+  recently announced (`POST /api/dispatch-targets`). The runner watches `runner.json` and
+  re-announces automatically within ~500ms of an edit — no restart needed. If it's still stale,
+  check `~/.relay/runner.log` for a "runner.json reload failed, keeping previous config running"
+  warning (your edit likely has invalid JSON or a missing required field, in which case the runner
+  keeps the last-good config running).
 - **A job never finishes**: it's killed after `RUNNER_JOB_TIMEOUT_MIN` (default 30; override via
   the environment before starting the runner) and reported back as `failed`.

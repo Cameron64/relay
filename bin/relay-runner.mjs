@@ -39,8 +39,8 @@
 // positional arg — the rest of the pipeline (parseClaudeOutput, job files) is unaffected.
 
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, statSync, renameSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, statSync, renameSync, rmSync, watch } from 'node:fs';
+import { join, dirname, basename } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import os from 'node:os';
 import { loadConfig, relayDir, projectFromCwd } from '../lib/relay-lib.mjs';
@@ -54,6 +54,9 @@ const POLL_WAIT_SECS = 50; // server caps ?wait at 55s; leave margin — see rou
 const RETRY_DELAY_MS = 5000; // backoff after a transient network/HTTP failure
 const JOB_TIMEOUT_MIN = Number(process.env.RUNNER_JOB_TIMEOUT_MIN ?? 30);
 const RESULT_CARD_BODY_MAX = 20 * 1024; // matches the plan's "truncate ~20 KB"
+const ANNOUNCE_INTERVAL_MS = 5 * 60 * 1000; // steady-state re-announce cadence, so the phone's target list self-heals after a server DB wipe/redeploy without a runner restart
+const ANNOUNCE_RETRY_MS = 30 * 1000; // faster retry cadence while the last announce is failing; reverts to ANNOUNCE_INTERVAL_MS on success
+const CONFIG_WATCH_DEBOUNCE_MS = 500; // coalesce the burst of fs events most editors/tools fire per save into one reload
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -208,14 +211,52 @@ async function httpJson(cfg, path, opts = {}, timeoutMs = 10_000) {
   }
 }
 
+// Returns true/false (never throws) so callers can decide the next announce cadence — see
+// runAnnounceCycle in mainLoop, which falls back to ANNOUNCE_RETRY_MS on false.
 async function announceTargets(cfg, runnerConfig) {
   const targets = runnerConfig.targets.map((t) => ({ id: t.id, label: t.label })); // ids + labels ONLY — never a path
   try {
     const r = await httpJson(cfg, '/api/dispatch-targets', { method: 'POST', body: JSON.stringify({ host: runnerConfig.host, targets }) });
-    if (!r.ok) log(`WARN announceTargets failed: ${r.status} ${JSON.stringify(r.body)}`);
-    else log(`announced ${targets.length} target(s) as "${runnerConfig.host}"`);
+    if (!r.ok) {
+      log(`WARN announceTargets failed: ${r.status} ${JSON.stringify(r.body)}`);
+      return false;
+    }
+    log(`announced ${targets.length} target(s) as "${runnerConfig.host}"`);
+    return true;
   } catch (e) {
     log(`WARN announceTargets network error: ${e.message || e}`); // non-fatal — the loop still runs
+    return false;
+  }
+}
+
+// --- runner.json live reload --------------------------------------------------
+// Watch the DIRECTORY containing runner.json rather than the file path itself: several common
+// editors/tools (and some deploy-style file syncs) replace a file via write-to-temp + rename
+// rather than an in-place write, and a watch bound to the old file path can silently stop firing
+// across that rename on some platforms. fs.watch (backed by ReadDirectoryChangesW on Windows) is
+// used over fs.watchFile's stat-polling — it reacts immediately instead of on a poll interval and
+// is the reliable cross-platform option here. Bursts of fs events per save are debounced into a
+// single reload ~500ms after the last event settles.
+function watchRunnerConfig(onChange) {
+  const dir = dirname(RUNNER_CONFIG_PATH);
+  const base = basename(RUNNER_CONFIG_PATH);
+  let debounceTimer = null;
+  try {
+    const watcher = watch(dir, (_eventType, filename) => {
+      if (filename && filename !== base) return;
+      if (debounceTimer) clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(onChange, CONFIG_WATCH_DEBOUNCE_MS);
+    });
+    // FSWatcher is an EventEmitter — an async 'error' emit (drive hiccup, dir removed/recreated)
+    // with no listener would crash the whole daemon. Absorb it: the poll loop must survive any
+    // watcher failure; losing live reload just means config edits need a restart again.
+    watcher.on('error', (e) => {
+      log(`WARN config watch failed — runner.json edits will require a restart until then: ${e.message || e}`);
+    });
+  } catch (e) {
+    // Best-effort: if the platform/filesystem can't support a watch here, the runner still works —
+    // config edits just need a restart to take effect, same as before this feature existed.
+    log(`WARN could not watch ${RUNNER_CONFIG_PATH} for changes — config reload will require a restart: ${e.message || e}`);
   }
 }
 
@@ -463,9 +504,54 @@ async function handleDispatch(cfg, runnerConfig, d) {
 // explicit default — "claim only when idle" avoids two headless sessions colliding in one repo).
 // The field is parsed/kept for a later plan to use; this loop simply never claims a second job
 // before the first one's reportStatus('done'|'failed') call returns.
-async function mainLoop(cfg, runnerConfig) {
+async function mainLoop(cfg, initialRunnerConfig) {
+  // Mutable so a config-file reload (see watchRunnerConfig below) can swap in a fresh target list
+  // that the rest of this loop — and handleDispatch's resolveTarget call — picks up on the very
+  // next iteration, without a process restart.
+  let runnerConfig = initialRunnerConfig;
   log(`relay-runner starting — host="${runnerConfig.host}" targets=[${runnerConfig.targets.map((t) => t.id).join(', ')}]`);
-  await announceTargets(cfg, runnerConfig);
+
+  // Self-rescheduling announce timer: announces now, then reschedules itself at either the
+  // steady-state 5-minute cadence (success) or the faster 30s retry cadence (failure), forever.
+  // A config reload calls this directly (see below) to re-announce immediately and reset the timer.
+  // In-flight guard: a cycle triggered while another's `await announceTargets` is still pending
+  // (announceTargets can block up to its 10s http timeout) sets a rerun flag instead of running
+  // concurrently — the in-flight cycle re-runs once on completion (picking up the latest
+  // runnerConfig) rather than letting two cycles race and cancel each other's schedule.
+  let announceTimer = null;
+  let announceInFlight = false;
+  let announceRerunQueued = false;
+  async function runAnnounceCycle() {
+    if (announceInFlight) {
+      announceRerunQueued = true;
+      return;
+    }
+    announceInFlight = true;
+    if (announceTimer) clearTimeout(announceTimer);
+    const ok = await announceTargets(cfg, runnerConfig);
+    announceInFlight = false;
+    if (announceRerunQueued) {
+      announceRerunQueued = false;
+      await runAnnounceCycle();
+      return;
+    }
+    announceTimer = setTimeout(runAnnounceCycle, ok ? ANNOUNCE_INTERVAL_MS : ANNOUNCE_RETRY_MS);
+  }
+  await runAnnounceCycle(); // startup announce; runAnnounceCycle itself keeps the cadence going after this
+
+  watchRunnerConfig(() => {
+    let newConfig;
+    try {
+      newConfig = loadRunnerConfig();
+    } catch (e) {
+      log(`WARN runner.json reload failed, keeping previous config running: ${e.message || e}`);
+      return;
+    }
+    const oldCount = runnerConfig.targets.length;
+    runnerConfig = newConfig;
+    log(`config reloaded: ${newConfig.targets.length} target(s) (was ${oldCount})`);
+    runAnnounceCycle(); // re-announce immediately with the new target list; resets the timer
+  });
 
   for (;;) {
     let next;

@@ -147,11 +147,17 @@ export interface DispatchAsset {
   mime: string;
 }
 
-// One entry of GET /api/dispatch-targets — an {id,label} pair a runner announced on startup. The
-// compose picker's <Select> options; never carries a path (see dispatch-store.ts).
+// One entry of GET /api/dispatch-targets — a target a runner announced on startup, unioned/de-duped
+// by id across hosts (see src/dispatch-store.ts's listTargets). The compose picker's <Select>
+// options; never carries a path, only id/label/host/timestamps (see the security invariant in
+// dispatch-store.ts). `host` + `updatedAt` (ISO string, ms epoch also fine to compare) let the
+// picker flag a target whose runner hasn't re-announced recently — runners now heartbeat every 5
+// minutes, so `updatedAt` doubles as a "host last seen" signal.
 export interface DispatchTarget {
   id: string;
   label: string;
+  host?: string;
+  updatedAt?: string;
 }
 
 // One row of GET /api/sessions (mirrors src/notify-log.ts's SessionSummary — relay-roadmap Plan
