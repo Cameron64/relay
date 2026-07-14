@@ -97,3 +97,9 @@ To start it right now without logging out again, double-click `runner\start-hidd
   keeps the last-good config running).
 - **A job never finishes**: it's killed after `RUNNER_JOB_TIMEOUT_MIN` (default 30; override via
   the environment before starting the runner) and reported back as `failed`.
+- **`WARN poll HTTP 502` in the log**: the server's long-poll hold (`GET /api/dispatches/next`) is
+  capped to `DISPATCH_POLL_HOLD_MS` (default 25s, set as an env var on the SERVER) specifically so
+  a hosting platform's edge proxy (e.g. Railway) never kills the connection mid-hold — that used to
+  surface as exactly this warning on nearly every poll. If you still see it after upgrading, your
+  platform's edge timeout is shorter than 25s; lower `DISPATCH_POLL_HOLD_MS` on the server to a
+  couple seconds under whatever that timeout is.
