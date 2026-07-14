@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // relay-runner — the desktop half of the phone-brainstorm bridge (relay-roadmap Plan 02).
 // Always-on daemon (see runner/SETUP.md for Windows startup wiring): reads ~/.relay/runner.json,
-// announces its targets to the server, then loops GET /api/dispatches/next?wait=50 forever. On a
+// announces its targets to the server, then loops GET /api/dispatches/next?wait=25 forever. On a
 // claimed job it spawns a headless `claude -p --output-format json` in the target's pre-approved
 // cwd, writes the phone's text to a job-scoped temp file OUTSIDE any repo, and reports
 // running -> done/failed back to the server. A successful job posts its own result CARD (which
@@ -50,7 +50,14 @@ const LOG_PATH = join(relayDir(), 'runner.log');
 const JOBS_DIR = join(relayDir(), 'runner-jobs');
 const LOG_MAX_BYTES = 5 * 1024 * 1024; // 5 MB, then rotate to .log.1 (single generation — good enough for a personal daemon)
 
-const POLL_WAIT_SECS = 50; // server caps ?wait at 55s; leave margin — see routes-dispatch.ts
+// The server itself caps the actual hold to DISPATCH_POLL_HOLD_MS (default 25s — see
+// routes-dispatch.ts) regardless of what we ask for here, so Railway's edge proxy never kills the
+// connection mid-hold (that was the cause of the constant `WARN poll HTTP 502` cycle: the old
+// server cap of 55s routinely outlasted the edge's own patience). Request a value matching that
+// default so logs/query params reflect what actually happens; our own client-side timeout below
+// still adds a full 10s of margin on top of whatever the server holds for, so a healthy hold is
+// never mistaken for a hang even if a deployment raises DISPATCH_POLL_HOLD_MS.
+const POLL_WAIT_SECS = 25;
 const RETRY_DELAY_MS = 5000; // backoff after a transient network/HTTP failure
 const JOB_TIMEOUT_MIN = Number(process.env.RUNNER_JOB_TIMEOUT_MIN ?? 30);
 const RESULT_CARD_BODY_MAX = 20 * 1024; // matches the plan's "truncate ~20 KB"

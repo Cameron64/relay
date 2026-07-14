@@ -29,6 +29,22 @@ import { recordNotify, pruneNotifyLog } from './notify-log.ts';
 
 export const dispatchRoutes = new Hono();
 
+// Railway's edge proxy kills a held-open request well before Hono's/Node's own timeouts fire —
+// observed in production as `WARN poll HTTP 502 "Application failed to respond"` on essentially
+// EVERY long-poll once the hold ran ~50s (the old 55s cap below). The edge doesn't wait that long.
+// Cap the hold here, server-side, regardless of what the runner asks for via ?wait=N, so the
+// connection always resolves (200, `{status:'none'}` if nothing queued) safely before the edge's
+// own timeout — 25s default, comfortably under it. Override via env if a given deployment's edge
+// timeout is known to differ.
+export const DISPATCH_POLL_HOLD_MS = Number(process.env.DISPATCH_POLL_HOLD_MS ?? 25_000);
+
+// Pure so it's unit-testable without spinning a real 25s timer — see routes-dispatch.test.ts.
+export function computePollWaitMs(waitQuery: string | undefined): number {
+  const waitN = Number(waitQuery || '0');
+  const requestedMs = Math.max(Number.isFinite(waitN) ? waitN : 0, 0) * 1000;
+  return Math.min(requestedMs, DISPATCH_POLL_HOLD_MS);
+}
+
 function notReady(c: any) {
   return c.json({ error: 'dispatch storage unavailable' }, 503);
 }
@@ -69,14 +85,14 @@ dispatchRoutes.get('/dispatches', requireUi, (c) => {
 });
 
 // --- runner long-poll for its next job (write side) -------------------------
-// Bounded long-poll (?wait=N, capped at 55s like /cards/:id/response) — resolves as soon as ANY
-// new dispatch is queued, then re-queries nextQueued() itself so the caller gets whatever is
-// oldest at that moment, not necessarily the one that triggered the wakeup (master doc §8).
+// Bounded long-poll (?wait=N seconds, requested value further capped to DISPATCH_POLL_HOLD_MS —
+// see that constant's comment for why) — resolves as soon as ANY new dispatch is queued, then
+// re-queries nextQueued() itself so the caller gets whatever is oldest at that moment, not
+// necessarily the one that triggered the wakeup (master doc §8).
 dispatchRoutes.get('/dispatches/next', requireWrite, async (c) => {
   if (!dispatch.dispatchReady()) return notReady(c);
   let d = dispatch.nextQueued();
-  const waitN = Number(c.req.query('wait') || '0');
-  const waitMs = Math.min(Math.max(Number.isFinite(waitN) ? waitN : 0, 0), 55) * 1000;
+  const waitMs = computePollWaitMs(c.req.query('wait'));
   if (!d && waitMs > 0) {
     const hasNew = await waitForDispatch(waitMs);
     if (hasNew) d = dispatch.nextQueued();
