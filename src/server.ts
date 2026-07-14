@@ -130,4 +130,16 @@ console.log(`[relay] listening on :${port}`);
 // Bun-native serve: exporting { port, fetch } makes `bun run src/server.ts` start the
 // server and bind $PORT (Railway injects it). Do NOT add @hono/node-server here — that's
 // the Node adapter and is wrong under Bun.
-export default { port, fetch: app.fetch };
+//
+// idleTimeout — THE root cause of the production long-poll 502s. Bun.serve's default is 10
+// SECONDS: any connection that goes 10s without bytes in either direction is closed by Bun
+// itself, response never sent. Every long-poll this app holds silently past 10s (dispatch
+// poll: 25s cap; card /response and /events polls: up to 55s) was therefore killed server-side,
+// and Railway's edge surfaced the dropped socket as `502 "Application failed to respond"` —
+// which looked exactly like an edge-proxy timeout and got misdiagnosed as one. Live bisect
+// proof: ?wait=5 and ?wait=10 returned clean 200s at 5s/10s, ?wait=15/20/25 all 502'd.
+// Must comfortably exceed the LONGEST silent hold (the 55s card-poll cap; the SSE stream pings
+// every 25s so it never goes silent that long). Bun caps this value at 255.
+const idleTimeout = Number(process.env.SERVER_IDLE_TIMEOUT_S ?? 70);
+
+export default { port, fetch: app.fetch, idleTimeout };

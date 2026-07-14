@@ -97,9 +97,13 @@ To start it right now without logging out again, double-click `runner\start-hidd
   keeps the last-good config running).
 - **A job never finishes**: it's killed after `RUNNER_JOB_TIMEOUT_MIN` (default 30; override via
   the environment before starting the runner) and reported back as `failed`.
-- **`WARN poll HTTP 502` in the log**: the server's long-poll hold (`GET /api/dispatches/next`) is
-  capped to `DISPATCH_POLL_HOLD_MS` (default 25s, set as an env var on the SERVER) specifically so
-  a hosting platform's edge proxy (e.g. Railway) never kills the connection mid-hold — that used to
-  surface as exactly this warning on nearly every poll. If you still see it after upgrading, your
-  platform's edge timeout is shorter than 25s; lower `DISPATCH_POLL_HOLD_MS` on the server to a
-  couple seconds under whatever that timeout is.
+- **`WARN poll HTTP 502` / `WARN poll failed: This operation was aborted` in the log**: the server
+  must survive holding the long-poll open silently. Two server-side knobs govern that, both env
+  vars on the SERVER (not the runner): `DISPATCH_POLL_HOLD_MS` (default 25s) caps how long
+  `GET /api/dispatches/next` is held before a clean `{status:"none"}`, and `SERVER_IDLE_TIMEOUT_S`
+  (default 70) is Bun.serve's idle-connection timeout — Bun's own default is 10 SECONDS, which
+  silently killed every hold longer than that and surfaced through Railway's edge as
+  `502 "Application failed to respond"` on nearly every poll (the original production bug, twice
+  misdiagnosed as an edge-proxy timeout). If these warnings reappear, verify `SERVER_IDLE_TIMEOUT_S`
+  comfortably exceeds `DISPATCH_POLL_HOLD_MS`, and only then suspect the platform's edge timeout
+  (lower `DISPATCH_POLL_HOLD_MS` under it if so).
