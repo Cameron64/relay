@@ -130,7 +130,11 @@ export function TopBar({
                   <SessionsPanel
                     onFollowUp={onFollowUp}
                     onOpenActivity={onOpenActivity}
-                    trigger={(open) => <Menu.Item onClick={open}>Sessions</Menu.Item>}
+                    trigger={(open) => (
+                      <Menu.Item closeMenuOnClick={false} onClick={open}>
+                        Sessions
+                      </Menu.Item>
+                    )}
                   />
                   <Menu.Item onClick={() => onOpenActivity()}>Activity</Menu.Item>
                 </>
