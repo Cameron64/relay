@@ -98,6 +98,10 @@ export interface Card {
   response?: CardResponse | null;
   created_at: string;
   expires_at?: string | null;
+  // Agent long-poll heartbeat (cards-v2): the server stamps this (toISOString) every time
+  // GET /api/cards/:id/response is hit, so the UI can tell "an agent is still waiting on this
+  // card" from "the agent probably went away" — see isAgentStale in store/feed.ts.
+  last_poll_at?: string | null;
   // COUNT(*) of this card's card_events — present on GET /api/cards/:id (single-card fetch) only,
   // NEVER on the feed list (see cards-store.ts's getCard). Absent = not fetched yet, not "zero".
   event_count?: number;

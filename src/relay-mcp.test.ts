@@ -3,7 +3,7 @@
 // server (the import.meta.main / argv entry guard stays false under the test runner).
 import { test, expect, describe, afterEach } from 'bun:test';
 // @ts-ignore — zero-dep .mjs server has no .d.ts
-import { cardArgsToPayload, askArgsToPayload, choiceArgsToPayload, pageArgsToPayload, formatResponse, withPagePayload, TOOL_DEFS } from '../bin/relay-mcp.mjs';
+import { cardArgsToPayload, askArgsToPayload, choiceArgsToPayload, pageArgsToPayload, formatResponse, withPagePayload, handleCall, TOOL_DEFS } from '../bin/relay-mcp.mjs';
 // @ts-ignore — zero-dep .mjs lib has no .d.ts
 import { safeFilename } from '../lib/relay-lib.mjs';
 // @ts-ignore — zero-dep .mjs has no .d.ts
@@ -298,6 +298,88 @@ describe('TOOL_DEFS', () => {
     expect(byName.relay_page.inputSchema.properties.waitSeconds.type).toBe('number');
     expect(byName.relay_page.description).toContain('__relay');
     expect(byName.relay_page.description).toContain('submit');
+  });
+
+  // Feature 3 — descriptions steer agents toward rich HTML/chart presentation via relay_page.
+  test('descriptions steer information-presentation toward relay_page', () => {
+    const byName = Object.fromEntries(TOOL_DEFS.map((t: any) => [t.name, t]));
+    expect(byName.relay_card.description).toContain('use relay_page instead');
+    expect(byName.relay_card.description).toContain('visual/HTML');
+    expect(byName.relay_page.description).toContain('PREFER this tool');
+    expect(byName.relay_ask.description).toContain('relay_page');
+    expect(byName.relay_choice.description).toContain('relay_page');
+  });
+
+  // New lifecycle: pending question cards auto-expire (CARD_PENDING_TTL_HOURS, default 24h), and
+  // every card gets a fallback reply box in the PWA (replies land as verdict 'reply', text in note).
+  test('descriptions document pending auto-expiry (pass a ttl matching real polling) and the fallback reply box', () => {
+    const byName = Object.fromEntries(TOOL_DEFS.map((t: any) => [t.name, t]));
+    for (const name of ['relay_card', 'relay_ask', 'relay_choice']) {
+      expect(byName[name].description).toContain('auto-expire');
+      expect(byName[name].description.toLowerCase()).toContain('ttl');
+    }
+    expect(byName.relay_card.description).toContain('fallback reply box');
+    expect(byName.relay_choice.description).toContain('fallback reply box');
+    expect(byName.relay_poll.description).toContain('fallback reply box');
+    expect(byName.relay_page.description).toContain('fallback reply box');
+  });
+});
+
+// handleCall('relay_page', …) blocking path — the initial wait must be thread-aware (eventsSince:0,
+// same as settle()): without it a human thread message on the pending page is invisible during the
+// first wait and the call just times out as 'pending'.
+describe('handleCall relay_page blocking poll', () => {
+  const realFetch = globalThis.fetch;
+  const realUrl = process.env.RELAY_URL;
+  const realToken = process.env.RELAY_WRITE_TOKEN;
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+    if (realUrl === undefined) delete process.env.RELAY_URL;
+    else process.env.RELAY_URL = realUrl;
+    if (realToken === undefined) delete process.env.RELAY_WRITE_TOKEN;
+    else process.env.RELAY_WRITE_TOKEN = realToken;
+  });
+
+  function stub(responses: any[]) {
+    process.env.RELAY_URL = 'https://relay.test';
+    process.env.RELAY_WRITE_TOKEN = 'tok';
+    const calls: any[] = [];
+    let i = 0;
+    globalThis.fetch = (async (url: any, opts: any) => {
+      calls.push({ url: String(url), opts });
+      const json = responses[Math.min(i, responses.length - 1)];
+      i++;
+      return { ok: true, status: 200, json: async () => json, text: async () => JSON.stringify(json) };
+    }) as any;
+    return calls;
+  }
+
+  test('the initial wait polls /response with events_since=0', async () => {
+    const calls = stub([
+      { id: 'p1', url: '/?card=p1' }, // POST /api/cards
+      { status: 'responded', response: { verdict: 'submit', action: 'submit', note: null } }, // GET .../response
+      { events: [{ card_id: 'p1', seq: 1, role: 'user', type: 'payload', body: JSON.stringify({ ok: 1 }), at: 't' }] }, // getCardEvents
+    ]);
+    const result = await handleCall('relay_page', { title: 'T', html: '<p>x</p>', expectResponse: true, waitSeconds: 5 });
+    const body = JSON.parse(result.content[0].text);
+    expect(calls[1].url).toContain('/api/cards/p1/response');
+    expect(calls[1].url).toContain('events_since=0');
+    expect(body.status).toBe('answered');
+    expect(body.verdict).toBe('submit');
+    expect(body.payload).toEqual({ ok: 1 });
+  });
+
+  test('a human thread message during the initial wait surfaces as status "event" (not a silent timeout)', async () => {
+    const calls = stub([
+      { id: 'p2', url: '/?card=p2' },
+      { status: 'event', events: [{ card_id: 'p2', seq: 2, role: 'user', type: 'message', body: 'which repo?', at: 't' }] },
+    ]);
+    const result = await handleCall('relay_page', { title: 'T', html: '<p>x</p>', expectResponse: true, waitSeconds: 5 });
+    const body = JSON.parse(result.content[0].text);
+    expect(calls[1].url).toContain('events_since=0');
+    expect(body.status).toBe('event');
+    expect(body.sinceSeq).toBe(2);
+    expect(body.message).toContain('relay_reply');
   });
 });
 

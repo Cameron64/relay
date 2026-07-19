@@ -1,6 +1,10 @@
 import { useEffect } from 'react';
-import { useFeed } from '../store/feed';
+import { useFeed, parseServerDate } from '../store/feed';
 import { fetchCards, fetchDispatches, fetchCardEvents } from '../api';
+
+// Full-list resyncs are cheap but shouldn't be hammered by a flapping EventSource (every failed
+// reconnect fires onopen again) or rapid tab switches — at most one per 30s.
+const FULL_RESYNC_MIN_INTERVAL_MS = 30_000;
 
 // Live feed over EventSource. Connects when `enabled` (i.e. unlocked + showing the feed). On a
 // reconnect AFTER the first open, it backfills any cards AND dispatches missed while disconnected
@@ -10,13 +14,62 @@ export function useSSE(enabled: boolean): void {
   useEffect(() => {
     if (!enabled) return;
     let connectedOnce = false;
+    let lastFullResyncAt = 0;
+    // Tombstones for every card-removed we've applied (dismiss/sweep are terminal — an id never
+    // comes back live). A fullResync GET captured BEFORE a dismiss can land AFTER its card-removed
+    // echo; without this, the stale snapshot's upsert would resurrect the dismissed card and no
+    // further SSE event would ever remove it again.
+    const removedIds = new Set<string>();
     const es = new EventSource('/api/stream', { withCredentials: true });
+
+    // Resolved-state sync reliability (cards-v2 Feature 2c): the cursor backfill below only
+    // fetches cards CREATED since the cursor — a card ANSWERED (or dismissed/swept) while the
+    // connection was down keeps looking pending forever. Fix: on reconnect and on tab-visible,
+    // re-fetch the FULL list and reconcile — upsert everything returned, remove store cards the
+    // server no longer has. Removal is guarded to cards created before the sync started, so a
+    // card-created SSE racing this fetch is never wiped.
+    const fullResync = async () => {
+      const startedAt = Date.now();
+      if (startedAt - lastFullResyncAt < FULL_RESYNC_MIN_INTERVAL_MS) return;
+      lastFullResyncAt = startedAt;
+      const res = await fetchCards();
+      if (res.status !== 'ok') return;
+      const serverIds = new Set(res.cards.map((c) => c.id));
+      // Skip tombstoned ids: this snapshot may predate a dismiss whose card-removed echo already
+      // landed — re-upserting would resurrect the card (see removedIds above).
+      res.cards.forEach((c) => {
+        if (!removedIds.has(c.id)) useFeed.getState().upsert(c);
+      });
+      // Removal pass. The server clamps the un-cursored list to the newest 100 (listCards'
+      // default) — when the response hits that clamp it is NOT a complete list, so absence only
+      // proves deletion for cards inside the returned created_at range; older store cards must be
+      // left alone or they'd vanish while still live server-side.
+      const clamped = res.cards.length >= 100;
+      let oldestServerCreatedAt: string | null = null;
+      for (const c of res.cards) {
+        if (oldestServerCreatedAt === null || c.created_at < oldestServerCreatedAt) oldestServerCreatedAt = c.created_at;
+      }
+      for (const c of useFeed.getState().cards) {
+        if (serverIds.has(c.id) || parseServerDate(c.created_at) >= startedAt) continue;
+        if (clamped && oldestServerCreatedAt !== null && c.created_at < oldestServerCreatedAt) continue;
+        useFeed.getState().remove(c.id);
+      }
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') void fullResync();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
 
     const onOpen = async () => {
       if (connectedOnce) {
+        void fullResync();
         const cursor = useFeed.getState().newestCursor;
         const res = await fetchCards(cursor);
-        if (res.status === 'ok') res.cards.forEach((c) => useFeed.getState().upsert(c));
+        // Same tombstone guard as fullResync: a stale backfill must not resurrect a removed card.
+        if (res.status === 'ok')
+          res.cards.forEach((c) => {
+            if (!removedIds.has(c.id)) useFeed.getState().upsert(c);
+          });
         const dispatchCursor = useFeed.getState().newestDispatchCursor;
         const dres = await fetchDispatches(dispatchCursor);
         if (dres.status === 'ok') dres.dispatches.forEach((d) => useFeed.getState().upsertDispatch(d));
@@ -53,7 +106,10 @@ export function useSSE(enabled: boolean): void {
     const onRemoved = (e: MessageEvent) => {
       try {
         const { id } = JSON.parse(e.data);
-        if (id) useFeed.getState().remove(id);
+        if (id) {
+          removedIds.add(id);
+          useFeed.getState().remove(id);
+        }
       } catch {
         /* ignore malformed */
       }
@@ -87,6 +143,7 @@ export function useSSE(enabled: boolean): void {
     es.addEventListener('card-event', onCardEvent);
 
     return () => {
+      document.removeEventListener('visibilitychange', onVisibility);
       es.close();
     };
   }, [enabled]);

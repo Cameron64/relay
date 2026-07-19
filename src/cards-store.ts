@@ -73,6 +73,10 @@ export type Card = {
   responded_at: string | null;
   priority: 'normal' | 'high';
   expires_at: string | null;
+  // "Agent is still listening" heartbeat — stamped (toISOString) every time the write-side
+  // GET /api/cards/:id/response long-poll is hit (see touchLastPoll). NULL until the first poll.
+  // The UI uses the gap since this stamp to flag cards whose agent probably stopped waiting.
+  last_poll_at: string | null;
   push_sent: boolean;
   assets: { id: string; mime: string }[];
   // Files the user attached when they replied (empty until responded-with-attachments). Rendered
@@ -154,8 +158,10 @@ export const PAGE_HTML_MAX = Number(process.env.RELAY_PAGE_HTML_MAX ?? 512 * 102
 // column (which was stored but never enforced before):
 //   1. Non-actionable cards (note/diagram/image/draft) auto-expire CARD_TTL_HOURS after creation
 //      unless the caller passed an explicit expires_at.
-//   2. Actionable cards (approval/choice/prompt) get NO default expiry while pending — they wait
-//      for a human, then rule 3 takes over.
+//   2. Actionable cards (approval/choice/prompt, or expects_response:true) get a LONGER default
+//      expiry while pending — CARD_PENDING_TTL_HOURS (default 24) — so an abandoned question
+//      doesn't sit in the feed forever, then rule 3 takes over once answered. (They previously got
+//      NO default expiry at all; every card now always carries a non-null expires_at.)
 //   3. Once a card is answered (respond) or dismissed, its expiry is pulled in to a short grace
 //      window (CARD_ANSWERED_TTL_HOURS) so resolved cards clear out of the feed soon after.
 // A periodic sweepExpired() (see server.ts) deletes expired rows and tells live clients to drop
@@ -164,14 +170,18 @@ export const PAGE_HTML_MAX = Number(process.env.RELAY_PAGE_HTML_MAX ?? 512 * 102
 // — mixing the two compares 'T'(0x54) vs ' '(0x20) and silently inverts the ordering.
 const CARD_TTL_HOURS = Number(process.env.CARD_TTL_HOURS ?? 24);
 const CARD_ANSWERED_TTL_HOURS = Number(process.env.CARD_ANSWERED_TTL_HOURS ?? 6);
-const NO_DEFAULT_EXPIRY_KINDS = new Set(['approval', 'choice', 'prompt']);
+const ACTIONABLE_KINDS = new Set(['approval', 'choice', 'prompt']);
 
-// expectsResponse (Plan 05) is the same "no default expiry while pending" treatment as the kinds
-// above, applied per-card rather than per-kind — a plain `page` still gets the 24h TTL bucket, but
-// a page created with expects_response:true (a question, not a view-only viz) waits for its answer
-// exactly like an approval/choice/prompt.
+// expectsResponse (Plan 05) gets the same pending-TTL treatment as the actionable kinds above,
+// applied per-card rather than per-kind — a plain `page` gets the CARD_TTL_HOURS bucket, but a
+// page created with expects_response:true (a question, not a view-only viz) waits for its answer
+// on the same clock as an approval/choice/prompt. Env read at call time so tests can override.
 function defaultExpiryFor(kind: string, createdAtIso: string, expectsResponse = false): string | null {
-  if (NO_DEFAULT_EXPIRY_KINDS.has(kind) || expectsResponse) return null;
+  if (ACTIONABLE_KINDS.has(kind) || expectsResponse) {
+    const pendingTtlHours = Number(process.env.CARD_PENDING_TTL_HOURS ?? 24);
+    if (!(pendingTtlHours > 0)) return null;
+    return new Date(Date.parse(createdAtIso) + pendingTtlHours * 3_600_000).toISOString();
+  }
   if (!(CARD_TTL_HOURS > 0)) return null;
   return new Date(Date.parse(createdAtIso) + CARD_TTL_HOURS * 3_600_000).toISOString();
 }
@@ -252,6 +262,12 @@ export function ensureCardsSchema(): void {
     // behavior is only conditioned on this column being explicitly true).
     if (!cols.some((c) => c.name === 'expects_response')) {
       db.exec('ALTER TABLE cards ADD COLUMN expects_response INTEGER NOT NULL DEFAULT 0');
+    }
+    // Migration: `last_poll_at` (agent long-poll heartbeat) was added after the table shipped.
+    // Nullable TEXT (ISO string via toISOString, never datetime('now') — see the time-comparison
+    // note near the TTL constants); existing rows backfill to NULL ("never polled").
+    if (!cols.some((c) => c.name === 'last_poll_at')) {
+      db.exec('ALTER TABLE cards ADD COLUMN last_poll_at TEXT');
     }
     _ready = true;
   } catch (err) {
@@ -367,7 +383,15 @@ export function validateCardInput(body: unknown): Ok<CardInput> | Err {
     page_html = pageHtmlRaw;
   }
   const source = b.source && typeof b.source === 'object' ? (b.source as Record<string, unknown>) : null;
-  const expires_at = typeof b.expires_at === 'string' ? b.expires_at : null;
+  const expiresRaw = typeof b.expires_at === 'string' ? b.expires_at : null;
+  // A provided expires_at must be a real date — expiry comparisons are ISO-string ordering, and an
+  // unparseable value would either never expire or expire instantly depending on how it collates.
+  if (expiresRaw !== null && Number.isNaN(new Date(expiresRaw).getTime()))
+    return { ok: false, error: `expires_at is not a valid date: ${expiresRaw}` };
+  // Normalize to toISOString before storing — a parseable-but-non-ISO form ('2026-07-19 18:00:00',
+  // or an offset like '...T20:00:00+02:00') would pass the check above yet collate wrongly against
+  // the toISOString() timestamps the liveness predicate and sweep compare with.
+  const expires_at = expiresRaw === null ? null : new Date(expiresRaw).toISOString();
   // expects_response: a plain boolean flag (Plan 05). Not restricted to kind:'page' — the effect
   // (no default expiry while pending + response-soliciting push) is harmless on any kind, and
   // scoping it here would just be one more branch to keep in sync with VALID_KINDS.
@@ -417,6 +441,7 @@ function hydrate(row: any): Card {
     responded_at: row.responded_at,
     priority: row.priority,
     expires_at: row.expires_at,
+    last_poll_at: row.last_poll_at ?? null,
     push_sent: !!row.push_sent,
     assets: assets.map((a) => ({ id: a.id, mime: a.mime })),
     response_assets: listResponseAssets(row.id),
@@ -675,6 +700,19 @@ export function getAsset(cardId: string, assetId: string): { mime: string; bytes
   }) as any;
   if (!row) return null;
   return { mime: row.mime, bytes: row.bytes as Uint8Array };
+}
+
+/**
+ * Stamp the agent long-poll heartbeat (see Card.last_poll_at). Called by the write-side
+ * GET /api/cards/:id/response handler at request arrival, BEFORE parking the waiter — poll waits
+ * are ~50s loops, so a stamp older than a few minutes means no agent is listening anymore.
+ * toISOString, never datetime('now') (time-comparison note near the TTL constants).
+ */
+export function touchLastPoll(id: string): void {
+  db.query('UPDATE cards SET last_poll_at = $now WHERE id = $id').run({
+    $now: new Date().toISOString(),
+    $id: id,
+  });
 }
 
 /** Mark a card dismissed and expire it immediately so it drops from the feed and is swept. */

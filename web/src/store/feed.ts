@@ -1,6 +1,48 @@
 import { create } from 'zustand';
 import type { Card, CardEvent, CardResponse, Dispatch } from '../types';
 
+// --- card status predicates (cards-v2) --------------------------------------
+// Pure functions (unit-tested in feed.test.ts) — take an explicit `nowMs` so callers drive
+// re-evaluation from their own ticker (Feed.tsx's 60s interval) and tests stay deterministic.
+
+// Agent poll waits are ~50s loops, so a >3-minute gap since the last long-poll means nobody is
+// waiting on the card anymore. A card that was NEVER polled gets a longer 10-minute grace from
+// creation (the agent may still be between create and first poll).
+export const AGENT_POLL_STALE_MS = 3 * 60_000;
+export const AGENT_UNPOLLED_STALE_MS = 10 * 60_000;
+
+// Server timestamps are toISOString (trailing Z); older rows may be naive UTC (no Z) — same
+// normalization as utils/markdown.ts's timeAgo.
+export function parseServerDate(iso: string): number {
+  return new Date(iso + (iso.endsWith('Z') ? '' : 'Z')).getTime();
+}
+
+// Client-side expiry (belt-and-braces alongside the server sweep + card-removed broadcast): a card
+// whose expires_at has passed should vanish from the feed even if no SSE event arrives.
+export function isCardExpired(card: Pick<Card, 'expires_at'>, nowMs: number): boolean {
+  if (!card.expires_at) return false;
+  const t = parseServerDate(card.expires_at);
+  return Number.isFinite(t) && t <= nowMs;
+}
+
+// "Agent probably stopped listening": pending + actionable, and either the poll heartbeat went
+// quiet (>3min since last_poll_at) or no poll ever arrived within 10min of creation.
+export function isAgentStale(
+  card: Pick<Card, 'status' | 'kind' | 'expects_response' | 'last_poll_at' | 'created_at'>,
+  nowMs: number,
+): boolean {
+  if (card.status !== 'pending') return false;
+  const actionable =
+    card.kind === 'approval' || card.kind === 'choice' || card.kind === 'prompt' || !!card.expects_response;
+  if (!actionable) return false;
+  if (card.last_poll_at) {
+    const t = parseServerDate(card.last_poll_at);
+    return Number.isFinite(t) && nowMs - t > AGENT_POLL_STALE_MS;
+  }
+  const created = parseServerDate(card.created_at);
+  return Number.isFinite(created) && nowMs - created > AGENT_UNPOLLED_STALE_MS;
+}
+
 // Sort newest-first by created_at (ISO strings compare lexicographically for the same format).
 // Generic over Card|Dispatch — both shapes carry a plain `created_at` ISO string.
 function sortDesc<T extends { created_at: string }>(items: T[]): T[] {
@@ -64,6 +106,14 @@ export const useFeed = create<FeedState>((set) => ({
   // once on mount and never re-reads card.body, so replacing the card object here is safe.
   upsert: (card, opts) =>
     set((s) => {
+      // A respond is one-shot server-side (respondCard conflicts on a second attempt), so a
+      // 'pending' copy arriving after we've already marked the card responded can only be a STALE
+      // snapshot (a fullResync/backfill GET captured before the respond) racing the card-updated
+      // echo — keep the resolved status/response, take the incoming row's other fields.
+      const existing = s.cards.find((c) => c.id === card.id);
+      if (existing?.status === 'responded' && card.status === 'pending') {
+        card = { ...card, status: 'responded', response: existing.response };
+      }
       const without = s.cards.filter((c) => c.id !== card.id);
       const cards = sortDesc([...without, card]);
       const newestCursor =

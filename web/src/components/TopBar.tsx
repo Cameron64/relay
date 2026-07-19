@@ -1,8 +1,6 @@
 import { ActionIcon, Box, Button, Group, Menu, Text, Tooltip, useComputedColorScheme, useMantineColorScheme } from '@mantine/core';
 import { useMediaQuery } from '@mantine/hooks';
 import { usePush } from '../hooks/usePush';
-import { SessionsPanel } from './SessionsPanel';
-import type { Dispatch } from '../types';
 
 // Injected at build time by Vite `define` (see vite.config.ts).
 declare const __BUILD_ID__: string;
@@ -36,15 +34,18 @@ export function TopBar({
   showLock,
   onLock,
   onCompose,
-  onFollowUp,
+  onOpenSessions,
   onOpenActivity,
 }: {
   showLock: boolean;
   onLock: () => void;
   onCompose?: () => void;
   // Both undefined together outside the 'feed' view (same gating as onCompose) — the Sessions
-  // button and the Activity button only make sense once there's a feed to act on.
-  onFollowUp?: (d: Dispatch) => void;
+  // button and the Activity button only make sense once there's a feed to act on. The drawers
+  // themselves live in App.tsx (one instance each, outside this bar); TopBar only opens them.
+  // WHY: on mobile these triggers sit inside Menu.Dropdown, which unmounts when the menu closes —
+  // any drawer state owned below the menu would be destroyed mid-open (the drawer flash-close bug).
+  onOpenSessions?: () => void;
   onOpenActivity?: (sessionId?: string | null) => void;
 }) {
   const { setColorScheme } = useMantineColorScheme();
@@ -124,18 +125,12 @@ export function TopBar({
                 ↻ Hard refresh
               </Menu.Item>
 
-              {showLock && onFollowUp && onOpenActivity ? (
+              {showLock && onOpenSessions && onOpenActivity ? (
                 <>
                   <Menu.Divider />
-                  <SessionsPanel
-                    onFollowUp={onFollowUp}
-                    onOpenActivity={onOpenActivity}
-                    trigger={(open) => (
-                      <Menu.Item closeMenuOnClick={false} onClick={open}>
-                        Sessions
-                      </Menu.Item>
-                    )}
-                  />
+                  {/* Let the menu close normally on click — the drawer lives in App.tsx, so the
+                      dropdown unmounting can't take the drawer down with it. */}
+                  <Menu.Item onClick={onOpenSessions}>Sessions</Menu.Item>
                   <Menu.Item onClick={() => onOpenActivity()}>Activity</Menu.Item>
                 </>
               ) : null}
@@ -199,7 +194,13 @@ export function TopBar({
           </ActionIcon>
         </Tooltip>
 
-        {showLock && onFollowUp && onOpenActivity ? <SessionsPanel onFollowUp={onFollowUp} onOpenActivity={onOpenActivity} /> : null}
+        {showLock && onOpenSessions ? (
+          <Tooltip label="Which Claude sessions exist, and do they need you" openDelay={300}>
+            <Button variant="subtle" size="xs" color="gray" onClick={onOpenSessions} aria-label="Sessions">
+              Sessions
+            </Button>
+          </Tooltip>
+        ) : null}
 
         {showLock && onOpenActivity ? (
           <Tooltip label="Notification history" openDelay={300}>
