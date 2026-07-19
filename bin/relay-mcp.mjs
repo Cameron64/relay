@@ -229,7 +229,7 @@ export const TOOL_DEFS = [
   {
     name: 'relay_notify',
     description:
-      "Send a fire-and-forget push notification to the user's phone/desktop. Use for FYI updates that need NO response (build finished, deploy done, long task started). For anything that needs an answer, use relay_ask, relay_choice, or relay_card instead.",
+      "Send a fire-and-forget push notification to the user's phone/desktop. Use for FYI updates that need NO response (build finished, deploy done, long task started). For anything that needs an answer, use relay_ask, relay_choice, or relay_card instead; to present rich information (charts, tables, reports), use relay_page.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -243,7 +243,7 @@ export const TOOL_DEFS = [
   {
     name: 'relay_card',
     description:
-      "Post a rich card to the Relay feed: a note, an approval request, or a Mermaid diagram. Returns the card id/url immediately by default. Set waitSeconds to BLOCK for a verdict — use kind='approval' for an Approve / Request changes decision. For a free-text answer use relay_ask; to pick among options use relay_choice.",
+      "Post a rich card to the Relay feed: a note, an approval request, or a Mermaid diagram. If the information would be clearer as a chart, graph, table with formatting, timeline, or any visual layout, use relay_page instead — the human strongly prefers visual/HTML presentation over walls of markdown. Returns the card id/url immediately by default. Set waitSeconds to BLOCK for a verdict — use kind='approval' for an Approve / Request changes decision. Pending question cards auto-expire (default 24h): pass a ttl matching how long you will actually poll (e.g. ttl:'30m' if you poll for 30 minutes) and say in the card body when you'll stop listening. Every card in the app also has a fallback reply box, so a blocking call can resolve with verdict 'reply' and the human's free text in note. For a free-text answer use relay_ask; to pick among options use relay_choice.",
     inputSchema: {
       type: 'object',
       required: ['title'],
@@ -273,7 +273,7 @@ export const TOOL_DEFS = [
         mermaid: { type: 'string', description: 'Mermaid diagram source; promotes a plain note to a diagram card.' },
         copy: { type: 'string', description: 'Text offered behind a one-tap "Copy to clipboard" button.' },
         high: { type: 'boolean', description: 'High-priority push (urgent + requireInteraction).' },
-        ttl: { type: 'string', description: 'Auto-clear after a duration ("30m","2h","1d") or "keep" to never expire.' },
+        ttl: { type: 'string', description: 'Auto-clear after a duration ("30m","2h","1d") or "keep" to never expire. Pending question cards default to ~24h — set this to match how long you will actually poll.' },
         waitSeconds: { type: 'number', description: 'Block up to N seconds (<=280) for a verdict. Omit / 0 = return immediately with the id.' },
       },
       additionalProperties: false,
@@ -287,9 +287,9 @@ SUBMIT PROTOCOL (optional — turns the page into a blocking question with a str
   window.parent.postMessage({ __relay: 'submit', payload: { ...any JSON, <=64KB... } }, '*');
 Call this ONCE; the parent only accepts the FIRST submit for a given card and silently ignores the rest — after calling it, disable your submit control and show a "sent" state (do not rely on the parent to tell you it was ignored). Optionally, right after the page loads, announce that it wants input (shows a "waiting for your input" banner in the app instead of plain page chrome):
   window.parent.postMessage({ __relay: 'ready', expectsResponse: true }, '*');
-'*' as the target origin is correct here — the sandboxed iframe has an opaque origin and cannot name the parent's; the parent validates the message by IDENTITY (its own iframe), not by origin. With expectResponse:true this tool blocks up to waitSeconds (default 50, same as relay_ask/relay_choice) and returns { status:'answered', verdict:'submit', payload:{...}, id } once the user submits; on 'pending', call relay_poll with the id to keep waiting — it also returns the payload once answered. Without expectResponse (the default), none of this applies — the page is exactly as view-only as before.
+'*' as the target origin is correct here — the sandboxed iframe has an opaque origin and cannot name the parent's; the parent validates the message by IDENTITY (its own iframe), not by origin. With expectResponse:true this tool blocks up to waitSeconds (default 50, same as relay_ask/relay_choice) and returns { status:'answered', verdict:'submit', payload:{...}, id } once the user submits; on 'pending', call relay_poll with the id to keep waiting — it also returns the payload once answered. The human can also skip the page's form and use the card's fallback reply box instead — that arrives as verdict 'reply' with the free text in note (no payload). Pending question pages auto-expire (default 24h) — pass a ttl matching how long you will actually poll, and say in the page when you'll stop listening. Without expectResponse (the default), none of this applies — the page is exactly as view-only as before.
 
-WHEN TO USE: prefer relay_page over relay_card's markdown when a static note won't do — you want a chart, an animation, an interactive control, a simulation, math/LaTeX, or a multi-section styled explainer.
+WHEN TO USE: PREFER this tool whenever you are presenting information: charts (Chart.js/Plotly), tables, comparisons, dashboards, reports, summaries with structure, animations, interactive controls, simulations, math/LaTeX, multi-section styled explainers. Markdown cards (relay_card) are for short plain notes only — the human strongly prefers visual/HTML presentation over walls of markdown.
 
 SANDBOX — design around it: the page runs in an opaque-origin iframe with sandbox="allow-scripts". It CAN load any CDN <script>/<link>, run JS, use canvas/SVG/WebGL, and fetch PUBLIC CORS APIs. It CANNOT reach Relay (no cookies/localStorage/API), CANNOT navigate the parent app, and window.alert/confirm/prompt are NO-OPS (allow-modals is omitted) — surface output/errors in the DOM, never via alert. There is no channel back to Relay.
 
@@ -328,7 +328,7 @@ Richer starting points (chart / dataviz / simulation / 3d / explainer) live in t
         ttl: { type: 'string', description: 'Auto-clear after a duration ("30m","2h","1d") or "keep" to never expire. Default ~24h.' },
         expectResponse: {
           type: 'boolean',
-          description: 'Set true when the page asks a question (see the SUBMIT PROTOCOL above) — blocks for the postMessage submit instead of returning immediately. No default expiry while pending.',
+          description: 'Set true when the page asks a question (see the SUBMIT PROTOCOL above) — blocks for the postMessage submit instead of returning immediately. Pending question pages auto-expire (default 24h) — pass a ttl matching how long you will actually poll.',
         },
         waitSeconds: {
           type: 'number',
@@ -341,7 +341,7 @@ Richer starting points (chart / dataviz / simulation / 3d / explainer) live in t
   {
     name: 'relay_ask',
     description:
-      'Ask the user an open-ended question and get their FREE-TEXT reply. Pushes a notification with a Reply button that opens a text box. Blocks up to waitSeconds (default 50) for the answer; on status "pending", call relay_poll with the returned id to keep waiting. Use when you need typed input — not a yes/no or a pick.',
+      'Ask the user an open-ended question and get their FREE-TEXT reply (arrives as verdict "reply" with the text in note). Pushes a notification with a Reply button that opens a text box. Blocks up to waitSeconds (default 50) for the answer; on status "pending", call relay_poll with the returned id to keep waiting. Use when you need typed input — not a yes/no or a pick. If the question needs supporting data (comparisons, metrics, diffs, options with tradeoffs), send a relay_page with the visuals first — or use relay_page with expectResponse:true and a form — rather than cramming data into the question body. Pending questions auto-expire (default 24h): pass a ttl matching how long you will actually poll (e.g. ttl:"30m" if you poll for 30 minutes) and say in the body when you\'ll stop listening.',
     inputSchema: {
       type: 'object',
       required: ['title'],
@@ -350,7 +350,7 @@ Richer starting points (chart / dataviz / simulation / 3d / explainer) live in t
         body: { type: 'string', description: 'Optional extra context (markdown).' },
         placeholder: { type: 'string', description: "Placeholder text for the reply box." },
         high: { type: 'boolean', description: 'High-priority push.' },
-        ttl: { type: 'string', description: 'Auto-clear duration ("30m","2h","1d") or "keep".' },
+        ttl: { type: 'string', description: 'Auto-clear duration ("30m","2h","1d") or "keep". Pending questions default to ~24h — set this to match how long you will actually poll.' },
         waitSeconds: { type: 'number', description: 'Block up to N seconds (<=280, default 50). 0 = create without waiting.' },
       },
       additionalProperties: false,
@@ -359,7 +359,7 @@ Richer starting points (chart / dataviz / simulation / 3d / explainer) live in t
   {
     name: 'relay_choice',
     description:
-      'Ask the user to pick ONE of several options. Blocks up to waitSeconds (default 50); the chosen option id comes back as the verdict. On status "pending", re-poll with relay_poll. Use for multiple-choice decisions; use relay_ask for free text and relay_card (approval) for approve/reject.',
+      'Ask the user to pick ONE of several options. Blocks up to waitSeconds (default 50); the chosen option id comes back as the verdict. On status "pending", re-poll with relay_poll. Use for multiple-choice decisions; use relay_ask for free text and relay_card (approval) for approve/reject. When the options carry data worth comparing (metrics, tradeoffs, diffs), send a relay_page with the comparison first (or use relay_page expectResponse with a form) rather than cramming data into the question body. The human can also ignore the options and type into the card\'s fallback reply box — that arrives as verdict "reply" with the text in note. Pending questions auto-expire (default 24h): pass a ttl matching how long you will actually poll, and say in the body when you\'ll stop listening.',
     inputSchema: {
       type: 'object',
       required: ['title', 'options'],
@@ -378,7 +378,7 @@ Richer starting points (chart / dataviz / simulation / 3d / explainer) live in t
           },
         },
         high: { type: 'boolean', description: 'High-priority push.' },
-        ttl: { type: 'string', description: 'Auto-clear duration ("30m","2h","1d") or "keep".' },
+        ttl: { type: 'string', description: 'Auto-clear duration ("30m","2h","1d") or "keep". Pending questions default to ~24h — set this to match how long you will actually poll.' },
         waitSeconds: { type: 'number', description: 'Block up to N seconds (<=280, default 50). 0 = create without waiting.' },
       },
       additionalProperties: false,
@@ -387,7 +387,7 @@ Richer starting points (chart / dataviz / simulation / 3d / explainer) live in t
   {
     name: 'relay_poll',
     description:
-      'Resume waiting for a response to a card created earlier by relay_ask / relay_choice / relay_card / relay_page that returned status "pending" or "event". Blocks up to waitSeconds (default 50). Returns status answered | event | pending | notfound. On "event" the human sent a thread message instead of answering yet — read events[], answer with relay_reply, then call relay_poll again with eventsSince set to the returned sinceSeq.',
+      'Resume waiting for a response to a card created earlier by relay_ask / relay_choice / relay_card / relay_page that returned status "pending" or "event". Blocks up to waitSeconds (default 50). Returns status answered | event | pending | notfound. On "event" the human sent a thread message instead of answering yet — read events[], answer with relay_reply, then call relay_poll again with eventsSince set to the returned sinceSeq. An answered result can carry verdict "reply" (free text in note) — every card in the app has a fallback reply box. Keep polling for as long as you told the user you would; pending cards auto-expire (default 24h, sooner with ttl) and then return notfound.',
     inputSchema: {
       type: 'object',
       required: ['id'],
@@ -488,7 +488,12 @@ export async function handleCall(name, rawArgs) {
         if (!args.expectResponse) return okResult({ status: 'created', id: created.id, url: created.url });
         const wait = resolveWait(args.waitSeconds, DEFAULT_WAIT);
         if (wait === 0) return okResult({ status: 'created', id: created.id, url: created.url });
-        const res = await pollResponse(cfg, created.id, wait);
+        // eventsSince:0 — same as settle(): without it a human thread message on the pending page
+        // would be invisible during this initial wait (the poll would just time out as 'pending').
+        // formatResponse turns the resulting status:'event' into the same read-events/relay_reply/
+        // re-poll instruction the other blocking tools return; withPagePayload only touches
+        // status:'answered' verdict:'submit', so 'event' passes through it untouched.
+        const res = await pollResponse(cfg, created.id, wait, 0);
         return okResult(await withPagePayload(cfg, formatResponse(res, created.id)));
       }
       case 'relay_ask': {

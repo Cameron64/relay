@@ -24,6 +24,7 @@ import {
   validateCardEventInput,
   appendCardEvent,
   listCardEvents,
+  touchLastPoll,
   __resetForTests,
 } from './cards-store.ts';
 
@@ -182,6 +183,20 @@ describe('validateCardInput', () => {
     expect(r.ok).toBe(true);
     if (r.ok) expect(r.value.kind).toBe('note');
   });
+  test('rejects a malformed expires_at; accepts a parseable one', () => {
+    const bad = validateCardInput({ title: 'x', expires_at: 'not-a-date' });
+    expect(bad.ok).toBe(false);
+    if (!bad.ok) expect(bad.error).toContain('expires_at');
+    const iso = new Date(Date.now() + 3_600_000).toISOString();
+    const good = validateCardInput({ title: 'x', expires_at: iso });
+    expect(good.ok).toBe(true);
+    if (good.ok) expect(good.value.expires_at).toBe(iso);
+  });
+  test('normalizes a parseable non-ISO expires_at to toISOString form — raw offset/space forms collate wrongly against ISO timestamps', () => {
+    const r = validateCardInput({ title: 'x', expires_at: '2026-07-19T20:00:00+02:00' });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value.expires_at).toBe('2026-07-19T18:00:00.000Z');
+  });
 });
 
 describe('page cards (kind:page)', () => {
@@ -228,9 +243,11 @@ describe('page-submit bridge (expects_response — Plan 05)', () => {
     if (asking.ok) expect(asking.value.expects_response).toBe(true);
   });
 
-  test('a page with expects_response:true gets no default expiry, like an approval', () => {
+  test('a page with expects_response:true gets the pending TTL (~24h), like an approval', () => {
     const asking = createCard(input({ kind: 'page', page_html: '<p>x</p>', expects_response: true }));
-    expect(asking.expires_at).toBeNull();
+    expect(asking.expires_at).not.toBeNull();
+    const ttlMs = Date.parse(asking.expires_at!) - Date.parse(asking.created_at);
+    expect(ttlMs).toBe(24 * 3_600_000);
   });
 
   test('a plain page (expects_response omitted/false) keeps the normal 24h-bucket default expiry', () => {
@@ -356,13 +373,36 @@ describe('respondCard — first-response-wins', () => {
 });
 
 describe('expiry & dismiss', () => {
-  test('default TTL applies to notes but not to approvals/choices/prompts', () => {
+  test('every kind gets a default expiry — notes the CARD_TTL bucket, actionables the pending TTL', () => {
     expect(createCard(input({ kind: 'note' })).expires_at).not.toBeNull();
     expect(createCard(input({ kind: 'diagram' })).expires_at).not.toBeNull();
     expect(createCard(input({ kind: 'page', page_html: '<p>x</p>' })).expires_at).not.toBeNull();
-    expect(createCard(input({ kind: 'approval' })).expires_at).toBeNull();
-    expect(createCard(input({ kind: 'choice' })).expires_at).toBeNull();
-    expect(createCard(input({ kind: 'prompt' })).expires_at).toBeNull();
+    expect(createCard(input({ kind: 'approval' })).expires_at).not.toBeNull();
+    expect(createCard(input({ kind: 'choice' })).expires_at).not.toBeNull();
+    expect(createCard(input({ kind: 'prompt' })).expires_at).not.toBeNull();
+  });
+
+  test('pending actionable cards get CARD_PENDING_TTL_HOURS (default 24h) from creation', () => {
+    for (const kind of ['approval', 'choice', 'prompt'] as const) {
+      const c = createCard(input({ kind }));
+      const ttlMs = Date.parse(c.expires_at!) - Date.parse(c.created_at);
+      expect(ttlMs).toBe(24 * 3_600_000);
+    }
+  });
+
+  test('CARD_PENDING_TTL_HOURS env overrides the pending TTL (read at call time)', () => {
+    process.env.CARD_PENDING_TTL_HOURS = '2';
+    try {
+      const c = createCard(input({ kind: 'approval' }));
+      expect(Date.parse(c.expires_at!) - Date.parse(c.created_at)).toBe(2 * 3_600_000);
+    } finally {
+      delete process.env.CARD_PENDING_TTL_HOURS;
+    }
+  });
+
+  test('a caller-supplied expires_at wins over the pending TTL on an actionable card', () => {
+    const future = new Date(Date.now() + 3_600_000).toISOString();
+    expect(createCard(input({ kind: 'approval', expires_at: future })).expires_at).toBe(future);
   });
 
   test('an explicit expires_at overrides the default', () => {
@@ -404,11 +444,49 @@ describe('expiry & dismiss', () => {
     expect(getCard(alive.id)).not.toBeNull();
   });
 
-  test('respondCard pulls a never-expiring card into a grace window', () => {
+  test('respondCard pulls a pending card into the shorter answered grace window', () => {
     const c = createCard(input({ kind: 'approval', buttons: [{ id: 'approved', label: 'A', behavior: 'respond', verdict: 'approved' }] }));
-    expect(c.expires_at).toBeNull();
+    expect(c.expires_at).not.toBeNull(); // pending TTL (24h) already set at creation
     respondCard(c.id, { action: 'approved' });
-    expect(getCard(c.id)?.expires_at).not.toBeNull();
+    const fresh = getCard(c.id)!;
+    expect(fresh.expires_at).not.toBeNull();
+    expect(fresh.expires_at! < c.expires_at!).toBe(true); // 6h grace < 24h pending TTL (ISO ordering)
+  });
+});
+
+describe('last_poll_at (agent long-poll heartbeat)', () => {
+  test('the cards table has a last_poll_at column (migration ran)', () => {
+    const cols = db.query('PRAGMA table_info(cards)').all() as { name: string }[];
+    expect(cols.some((c) => c.name === 'last_poll_at')).toBe(true);
+  });
+
+  test('a new card hydrates last_poll_at as null; touchLastPoll stamps an ISO string', () => {
+    const card = createCard(input({ kind: 'approval' }));
+    expect(card.last_poll_at).toBeNull();
+    const before = new Date().toISOString();
+    touchLastPoll(card.id);
+    const stamped = getCard(card.id)!.last_poll_at;
+    expect(stamped).not.toBeNull();
+    // toISOString format (T/Z), never SQLite's space-format datetime('now')
+    expect(stamped).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+    expect(stamped! >= before).toBe(true);
+  });
+
+  test('touchLastPoll moves the stamp forward on a repeat poll', async () => {
+    const card = createCard(input({ kind: 'approval' }));
+    touchLastPoll(card.id);
+    const first = getCard(card.id)!.last_poll_at!;
+    await new Promise((r) => setTimeout(r, 5));
+    touchLastPoll(card.id);
+    const second = getCard(card.id)!.last_poll_at!;
+    expect(second > first).toBe(true); // ISO ordering == chronological ordering
+  });
+
+  test('listCards includes last_poll_at', () => {
+    const card = createCard(input({ kind: 'approval' }));
+    touchLastPoll(card.id);
+    const fromList = listCards().find((c) => c.id === card.id)!;
+    expect(fromList.last_poll_at).not.toBeNull();
   });
 });
 

@@ -6,7 +6,8 @@
 // file in the process, so schema init + __resetForTests() here mirror cards-store.test.ts's setup.
 import { test, expect, describe, beforeAll, beforeEach } from 'bun:test';
 import { appRoutes, shouldPushThreadReply } from './routes-cards.ts';
-import { ensureCardsSchema, createCard, __resetForTests } from './cards-store.ts';
+import { ensureCardsSchema, createCard, getCard, dismissCard, __resetForTests } from './cards-store.ts';
+import { addClient, removeClient } from './stream.ts';
 import { store } from './store.ts';
 import { ensureNotifyLogSchema, listNotifications, __resetForTests as resetNotifyLog } from './notify-log.ts';
 
@@ -168,6 +169,75 @@ describe('GET /cards/:id/response — events_since (Plan 04 thread awareness)', 
     const body = await json(await getResponse(card.id, '?wait=0&events_since=0'));
     expect(body.status).toBe('responded');
     expect(body.events).toHaveLength(1);
+  });
+});
+
+describe('last_poll_at heartbeat (GET /cards/:id/response stamps it)', () => {
+  test('a poll stamps last_poll_at at request arrival (wait=0, still pending)', async () => {
+    const card = createCard(input());
+    expect(getCard(card.id)!.last_poll_at).toBeNull();
+    const before = new Date().toISOString();
+    const body = await json(await getResponse(card.id, '?wait=0'));
+    expect(body.status).toBe('pending');
+    const stamped = getCard(card.id)!.last_poll_at;
+    expect(stamped).not.toBeNull();
+    expect(stamped! >= before).toBe(true); // ISO ordering == chronological ordering
+  });
+
+  test('a repeat poll moves the stamp forward', async () => {
+    const card = createCard(input());
+    await getResponse(card.id, '?wait=0');
+    const first = getCard(card.id)!.last_poll_at!;
+    await new Promise((r) => setTimeout(r, 5));
+    await getResponse(card.id, '?wait=0');
+    expect(getCard(card.id)!.last_poll_at! > first).toBe(true);
+  });
+
+  test('GET /cards (feed) and GET /cards/:id both return last_poll_at', async () => {
+    const card = createCard(input());
+    await getResponse(card.id, '?wait=0');
+    const feed = await json(await appRoutes.request('/cards', { headers: UI_HEADERS }));
+    const fromFeed = feed.cards.find((c: any) => c.id === card.id);
+    expect(fromFeed.last_poll_at).not.toBeNull();
+    const single = await json(await appRoutes.request(`/cards/${card.id}`, { headers: UI_HEADERS }));
+    expect(single.card.last_poll_at).toBe(fromFeed.last_poll_at);
+  });
+
+  test('a never-polled card returns last_poll_at: null in the feed', async () => {
+    const card = createCard(input());
+    const feed = await json(await appRoutes.request('/cards', { headers: UI_HEADERS }));
+    expect(feed.cards.find((c: any) => c.id === card.id).last_poll_at).toBeNull();
+  });
+
+  // The heartbeat must reach live tabs too: a healthy long-lived connection only ever sees
+  // last_poll_at from its initial load, so without a card-updated broadcast per poll the client's
+  // staleness warning false-positives on a card whose agent is polling right now.
+  test('a poll on a pending card broadcasts card-updated carrying the fresh last_poll_at', async () => {
+    const card = createCard(input());
+    const received: { event?: string; data: string }[] = [];
+    const clientId = addClient({ writeSSE: async (msg: any) => void received.push(msg) } as any);
+    try {
+      await getResponse(card.id, '?wait=0');
+    } finally {
+      removeClient(clientId);
+    }
+    const updated = received.filter((m) => m.event === 'card-updated');
+    expect(updated).toHaveLength(1);
+    expect(JSON.parse(updated[0].data).last_poll_at).not.toBeNull();
+  });
+
+  test('a poll on a dismissed card does NOT broadcast card-updated (upsert would resurrect it in feeds)', async () => {
+    const card = createCard(input());
+    dismissCard(card.id);
+    const received: { event?: string; data: string }[] = [];
+    const clientId = addClient({ writeSSE: async (msg: any) => void received.push(msg) } as any);
+    try {
+      const res = await getResponse(card.id, '?wait=0');
+      expect(res.status).toBe(404);
+    } finally {
+      removeClient(clientId);
+    }
+    expect(received.filter((m) => m.event === 'card-updated')).toHaveLength(0);
   });
 });
 

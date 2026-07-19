@@ -1,7 +1,9 @@
 import { describe, test, expect, afterEach, beforeEach, vi } from 'vitest';
-import { render, cleanup, screen } from '@testing-library/react';
+import { render, cleanup, screen, fireEvent, waitFor } from '@testing-library/react';
+import { useState } from 'react';
 import { MantineProvider } from '@mantine/core';
 import { TopBar } from './TopBar';
+import { SessionsPanel } from './SessionsPanel';
 
 // usePush touches serviceWorker/PushManager/Notification, none of which jsdom implements — mock it
 // to a stable "supported, enabled" shape so the bar renders its notification control deterministically.
@@ -16,13 +18,25 @@ vi.mock('../hooks/usePush', () => ({
   }),
 }));
 
-// SessionsPanel fetches on drawer open only; the module still imports api at load time, so stub it.
+// SessionsPanel fetches on drawer open; resolve to an empty-but-ok payload so the drawer settles
+// into its empty state instead of rejecting.
 vi.mock('../api', () => ({
-  fetchSessions: vi.fn(),
+  fetchSessions: vi.fn(async () => ({ status: 'ok', sessions: [] })),
   cancelDispatch: vi.fn(),
 }));
 
 afterEach(cleanup);
+
+// jsdom has no ResizeObserver; Mantine's ScrollArea (used by the SessionsPanel drawer via
+// scrollAreaComponent={ScrollArea.Autosize}) observes its viewport on mount. A no-op stub is enough.
+class ResizeObserverStub {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+}
+if (typeof window !== 'undefined' && !('ResizeObserver' in window)) {
+  (window as unknown as { ResizeObserver: typeof ResizeObserverStub }).ResizeObserver = ResizeObserverStub;
+}
 
 // isMobile comes from useMediaQuery, which reads window.matchMedia. test-setup.ts installs a matcher
 // that returns matches:false; per-test we override it to force the mobile branch.
@@ -46,7 +60,7 @@ function renderBar() {
         showLock
         onLock={vi.fn()}
         onCompose={vi.fn()}
-        onFollowUp={vi.fn()}
+        onOpenSessions={vi.fn()}
         onOpenActivity={vi.fn()}
       />
     </MantineProvider>,
@@ -78,5 +92,57 @@ describe('TopBar — responsive layout', () => {
     expect(screen.queryByRole('button', { name: 'Lock' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Notification history' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Sessions' })).not.toBeInTheDocument();
+  });
+});
+
+// App.tsx-shaped harness: TopBar only signals "open sessions"; the drawer state and the single
+// SessionsPanel instance live in the PARENT, outside the Menu. This mirrors the fix for the
+// drawer flash-close bug — if the state ever moves back under Menu.Dropdown, the regression test
+// below fails (the dropdown's unmount would destroy the drawer).
+function SessionsHarness() {
+  const [sessionsOpen, setSessionsOpen] = useState(false);
+  return (
+    <MantineProvider>
+      <TopBar
+        showLock
+        onLock={vi.fn()}
+        onCompose={vi.fn()}
+        onOpenSessions={() => setSessionsOpen(true)}
+        onOpenActivity={vi.fn()}
+      />
+      <SessionsPanel
+        opened={sessionsOpen}
+        onClose={() => setSessionsOpen(false)}
+        onFollowUp={vi.fn()}
+        onOpenActivity={vi.fn()}
+      />
+    </MantineProvider>
+  );
+}
+
+describe('TopBar — sessions drawer survives the overflow menu closing (flash-close regression)', () => {
+  beforeEach(() => setMatchMedia(true));
+
+  test('mobile: tapping Sessions closes the menu (dropdown unmounts) but the drawer stays open', async () => {
+    render(<SessionsHarness />);
+
+    // Open the overflow menu and tap Sessions. The Menu.Item deliberately has no
+    // closeMenuOnClick={false} — the menu is EXPECTED to close (and unmount its dropdown).
+    fireEvent.click(screen.getByRole('button', { name: 'More actions' }));
+    const item = await screen.findByRole('menuitem', { name: 'Sessions' });
+    fireEvent.click(item);
+
+    // The drawer opens…
+    const drawer = await screen.findByRole('dialog');
+    expect(drawer).toBeInTheDocument();
+
+    // …and the menu dropdown fully unmounts (the old bug's trigger)…
+    await waitFor(() => {
+      expect(screen.queryByRole('menuitem', { name: 'Sessions' })).not.toBeInTheDocument();
+    });
+
+    // …yet the drawer is STILL open, because its state lives in the parent, not under the menu.
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+    expect(await screen.findByText('No sessions in the last 24 hours', { exact: false })).toBeInTheDocument();
   });
 });

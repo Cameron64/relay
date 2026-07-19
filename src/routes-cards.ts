@@ -325,6 +325,15 @@ appRoutes.get('/cards/:id/response', requireWrite, async (c) => {
   const id = c.req.param('id') as string;
   const card = cards.getCard(id);
   if (!card) return c.json({ error: 'not found' }, 404);
+  // Heartbeat: stamp last_poll_at at request arrival, before any waiting — the UI reads the gap
+  // since this stamp to flag pending cards whose agent has probably stopped listening. Broadcast
+  // the refreshed row too: without it a healthy long-lived tab only ever sees the stamp from its
+  // initial load/resync, so a frozen last_poll_at would false-positive the staleness warning on a
+  // card whose agent is polling right now. Once per poll cycle (~50s/card) — cheap. Pending only:
+  // a dismissed card's row must never be re-broadcast into feeds (upsert would resurrect it), and
+  // responded cards don't carry the warning at all.
+  cards.touchLastPoll(id);
+  if (card.status === 'pending') await broadcast('card-updated', cards.getCard(id));
   const sinceParam = c.req.query('events_since');
   // 0 is a valid sinceSeq (seq starts at 1, so "since 0" means "every event so far") — only an
   // ABSENT param means "no thread awareness at all", so this can't just be `Number(...) || undefined`.

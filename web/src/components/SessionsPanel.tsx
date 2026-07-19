@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import type { ReactNode } from 'react';
 import {
   ActionIcon,
   Badge,
@@ -12,9 +11,7 @@ import {
   ScrollArea,
   Stack,
   Text,
-  Tooltip,
 } from '@mantine/core';
-import { useDisclosure } from '@mantine/hooks';
 import { notifications } from '@mantine/notifications';
 import { fetchSessions, cancelDispatch } from '../api';
 import { useFeed } from '../store/feed';
@@ -25,9 +22,12 @@ import type { Dispatch, SessionStatus, SessionSummary } from '../types';
 // relay-roadmap Plan 03 — "which Claude sessions exist right now, what project, what state, and
 // does it need me", built almost entirely from data Relay already collects (GET /api/sessions
 // folds notify-log + the runner's claude_session linkage — see src/notify-log.ts's
-// aggregateSessions). Self-contained button + Drawer, same shape as Activity.tsx's OLD
-// self-managed form (Activity itself is now lifted to App.tsx because SessionsPanel needs to be
-// able to open IT from a row action — see the "otherwise" case below).
+// aggregateSessions). Drawer-only, open state lifted to App.tsx — same pattern as Activity.tsx.
+// WHY lifted: on mobile the open trigger lives inside TopBar's overflow Menu.Dropdown, which
+// unmounts when the menu closes (keepMounted defaults false, and its click-outside listener fires
+// on the first touch on the portaled Drawer). If this component owned its drawer state, that
+// unmount destroyed it and the drawer flash-closed. One instance rendered in App.tsx, outside
+// TopBar/Menu, so menu lifecycle can never kill the drawer.
 //
 // This is an event-derived view, not process-level truth (see the plan's Non-goals): a killed
 // terminal never reports 'ended' unless the SessionEnd hook fired. 'stale' is the honest label for
@@ -174,17 +174,16 @@ function SessionRow({
 }
 
 export function SessionsPanel({
+  opened,
+  onClose,
   onFollowUp,
   onOpenActivity,
-  trigger,
 }: {
+  opened: boolean;
+  onClose: () => void;
   onFollowUp: (d: Dispatch) => void;
   onOpenActivity: (sessionId: string) => void;
-  // Optional custom trigger — lets the mobile overflow menu render its own Menu.Item that opens
-  // the drawer, instead of the default toolbar button. Given the drawer's `open` callback.
-  trigger?: (open: () => void) => ReactNode;
 }) {
-  const [opened, { open, close }] = useDisclosure(false);
   const [state, setState] = useState<'idle' | 'loading' | 'ok' | 'warming' | 'error'>('idle');
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const dispatches = useFeed((s) => s.dispatches);
@@ -249,84 +248,72 @@ export function SessionsPanel({
   }, [sessions]);
 
   return (
-    <>
-      {trigger ? (
-        trigger(open)
-      ) : (
-        <Tooltip label="Which Claude sessions exist, and do they need you" openDelay={300}>
-          <Button variant="subtle" size="xs" color="gray" onClick={open} aria-label="Sessions">
-            Sessions
+    <Drawer
+      opened={opened}
+      onClose={onClose}
+      position="right"
+      size="md"
+      title={
+        <Group gap="xs">
+          <Text fw={700}>Sessions</Text>
+          <ActionIcon variant="subtle" size="sm" onClick={load} aria-label="Refresh" loading={state === 'loading'}>
+            ↻
+          </ActionIcon>
+        </Group>
+      }
+      scrollAreaComponent={ScrollArea.Autosize}
+    >
+      {state === 'loading' && sessions.length === 0 ? (
+        <Center mih="40vh">
+          <Loader />
+        </Center>
+      ) : state === 'warming' ? (
+        <Text c="dimmed" ta="center" py="xl">
+          The audit log is warming up — try again in a moment.
+        </Text>
+      ) : state === 'error' ? (
+        <Stack align="center" py="xl" gap="sm">
+          <Text c="dimmed">Couldn't load sessions.</Text>
+          <Button variant="light" size="xs" onClick={load}>
+            Retry
           </Button>
-        </Tooltip>
-      )}
-
-      <Drawer
-        opened={opened}
-        onClose={close}
-        position="right"
-        size="md"
-        title={
+        </Stack>
+      ) : sessions.length === 0 ? (
+        <Text c="dimmed" ta="center" py="xl">
+          No sessions in the last 24 hours. Wire the SessionStart/SessionEnd hooks (see
+          hooks/SETUP.md) to see them show up here.
+        </Text>
+      ) : (
+        <Stack gap="sm" pb="md">
           <Group gap="xs">
-            <Text fw={700}>Sessions</Text>
-            <ActionIcon variant="subtle" size="sm" onClick={load} aria-label="Refresh" loading={state === 'loading'}>
-              ↻
-            </ActionIcon>
+            {counts.needsInput > 0 ? (
+              <Badge color="red" variant="filled" size="sm">
+                {counts.needsInput} need{counts.needsInput === 1 ? 's' : ''} input
+              </Badge>
+            ) : null}
+            {counts.active > 0 ? (
+              <Badge color="indigo" variant="light" size="sm">
+                {counts.active} active
+              </Badge>
+            ) : null}
+            {counts.idle > 0 ? (
+              <Badge color="gray" variant="light" size="sm">
+                {counts.idle} idle
+              </Badge>
+            ) : null}
           </Group>
-        }
-        scrollAreaComponent={ScrollArea.Autosize}
-      >
-        {state === 'loading' && sessions.length === 0 ? (
-          <Center mih="40vh">
-            <Loader />
-          </Center>
-        ) : state === 'warming' ? (
-          <Text c="dimmed" ta="center" py="xl">
-            The audit log is warming up — try again in a moment.
-          </Text>
-        ) : state === 'error' ? (
-          <Stack align="center" py="xl" gap="sm">
-            <Text c="dimmed">Couldn't load sessions.</Text>
-            <Button variant="light" size="xs" onClick={load}>
-              Retry
-            </Button>
-          </Stack>
-        ) : sessions.length === 0 ? (
-          <Text c="dimmed" ta="center" py="xl">
-            No sessions in the last 24 hours. Wire the SessionStart/SessionEnd hooks (see
-            hooks/SETUP.md) to see them show up here.
-          </Text>
-        ) : (
-          <Stack gap="sm" pb="md">
-            <Group gap="xs">
-              {counts.needsInput > 0 ? (
-                <Badge color="red" variant="filled" size="sm">
-                  {counts.needsInput} need{counts.needsInput === 1 ? 's' : ''} input
-                </Badge>
-              ) : null}
-              {counts.active > 0 ? (
-                <Badge color="indigo" variant="light" size="sm">
-                  {counts.active} active
-                </Badge>
-              ) : null}
-              {counts.idle > 0 ? (
-                <Badge color="gray" variant="light" size="sm">
-                  {counts.idle} idle
-                </Badge>
-              ) : null}
-            </Group>
-            {sessions.map((s) => (
-              <SessionRow
-                key={s.sessionId ?? `${s.cwd ?? ''}|${s.host ?? ''}`}
-                session={s}
-                dispatch={s.dispatchId ? dispatchById.get(s.dispatchId) : undefined}
-                pendingCardId={s.sessionId ? pendingCardBySession.get(s.sessionId) : undefined}
-                onFollowUp={onFollowUp}
-                onOpenActivity={onOpenActivity}
-              />
-            ))}
-          </Stack>
-        )}
-      </Drawer>
-    </>
+          {sessions.map((s) => (
+            <SessionRow
+              key={s.sessionId ?? `${s.cwd ?? ''}|${s.host ?? ''}`}
+              session={s}
+              dispatch={s.dispatchId ? dispatchById.get(s.dispatchId) : undefined}
+              pendingCardId={s.sessionId ? pendingCardBySession.get(s.sessionId) : undefined}
+              onFollowUp={onFollowUp}
+              onOpenActivity={onOpenActivity}
+            />
+          ))}
+        </Stack>
+      )}
+    </Drawer>
   );
 }

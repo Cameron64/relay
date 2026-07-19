@@ -6,6 +6,7 @@ import { UnlockScreen } from './components/UnlockScreen';
 import { Feed } from './components/Feed';
 import { Compose } from './components/Compose';
 import { Activity } from './components/Activity';
+import { SessionsPanel } from './components/SessionsPanel';
 import { useSSE } from './hooks/useSSE';
 import { useFeed } from './store/feed';
 import { fetchCards, fetchDispatches } from './api';
@@ -44,6 +45,14 @@ export function App() {
     setActivitySessionFilter(sessionId ?? null);
     setActivityOpen(true);
   }, []);
+
+  // Sessions drawer state, lifted here for the same reason as Activity: on mobile its open
+  // trigger lives inside TopBar's overflow Menu.Dropdown, which unmounts when the menu closes.
+  // If SessionsPanel owned its drawer state below that menu, the first touch on the drawer closed
+  // the menu → unmounted the panel → destroyed the state → the drawer flash-closed. One instance
+  // renders below, outside TopBar/Menu, so menu lifecycle can never kill it.
+  const [sessionsOpen, setSessionsOpen] = useState(false);
+  const openSessions = useCallback(() => setSessionsOpen(true), []);
 
   // GET /api/cards: 200 -> populate + feed; 401/error -> unlock; 503 -> feed (warming, SSE backfills).
   // Dispatches are fetched best-effort alongside — a warming/error dispatch fetch never blocks the
@@ -95,7 +104,7 @@ export function App() {
           showLock={view === 'feed'}
           onLock={onLock}
           onCompose={view === 'feed' ? openCompose : undefined}
-          onFollowUp={view === 'feed' ? openFollowUp : undefined}
+          onOpenSessions={view === 'feed' ? openSessions : undefined}
           onOpenActivity={view === 'feed' ? openActivity : undefined}
         />
       </Box>
@@ -112,6 +121,12 @@ export function App() {
       </Container>
       <Compose opened={composeOpen} onClose={() => setComposeOpen(false)} resumeOf={composeResumeOf} lockedTarget={composeLockedTarget} />
       <Activity opened={activityOpen} onClose={() => setActivityOpen(false)} initialSessionId={activitySessionFilter} />
+      <SessionsPanel
+        opened={sessionsOpen}
+        onClose={() => setSessionsOpen(false)}
+        onFollowUp={openFollowUp}
+        onOpenActivity={openActivity}
+      />
     </>
   );
 }

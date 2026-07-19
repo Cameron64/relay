@@ -483,9 +483,10 @@ export function buildChoicePayload({ title, body = null, options = [], priority 
 // command — this builder exists so the MCP server (relay_page) shares the same tested payload shape.
 //
 // expectsResponse: false (default) is a plain view-only page — unchanged from before Plan 05.
-// true marks the card as response-soliciting: no default expiry while pending (cards-store.ts
-// treats it like an approval) and the push is sent at high urgency (routes-cards.ts). It does NOT
-// add any button/action — the page itself must call postMessage({__relay:'submit', payload}).
+// true marks the card as response-soliciting: pending it defaults to a CARD_PENDING_TTL_HOURS
+// expiry (~24h, like an approval — cards-store.ts defaultExpiryFor) and the push is sent at high
+// urgency (routes-cards.ts). It does NOT add any button/action — the page itself must call
+// postMessage({__relay:'submit', payload}).
 export function buildPagePayload({ title, pageHtml, copyText = null, priority = 'normal', push = true, expiresAt = null, expectsResponse = false, source = {} }) {
   if (!title) throw new Error('relay page: title is required');
   if (!pageHtml) throw new Error('relay page: html is required');
@@ -541,7 +542,8 @@ async function cmdCard(cfg, flags) {
   }
 
   // Expiry: --ttl sets an explicit lifetime; --keep opts out (far-future); otherwise omit and let
-  // the server apply its kind-based default (notes expire, approvals persist until answered).
+  // the server apply its kind-based default (notes ~24h; pending question cards also default to
+  // CARD_PENDING_TTL_HOURS, ~24h — pass --ttl to match how long you'll actually poll).
   let expiresAt = null;
   if (flags.keep) {
     expiresAt = '9999-12-31T23:59:59.999Z';

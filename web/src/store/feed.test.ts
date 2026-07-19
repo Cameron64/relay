@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { useFeed } from './feed';
+import { useFeed, isCardExpired, isAgentStale } from './feed';
 import type { Card, CardEvent, Dispatch } from '../types';
 
 function event(cardId: string, seq: number, extra: Partial<CardEvent> = {}): CardEvent {
@@ -58,6 +58,16 @@ describe('feed store', () => {
     useFeed.getState().applyResolved('a', { verdict: 'approved' });
     expect(useFeed.getState().cards[0].status).toBe('responded');
     expect(useFeed.getState().cards[0].response?.verdict).toBe('approved');
+  });
+
+  it('upsert never downgrades a responded card back to pending (stale resync snapshot losing the race)', () => {
+    useFeed.getState().upsert(card('a', '2026-06-14T10:00:00Z', { kind: 'approval' }));
+    useFeed.getState().applyResolved('a', { verdict: 'approved' });
+    useFeed.getState().upsert(card('a', '2026-06-14T10:00:00Z', { kind: 'approval', status: 'pending', title: 'fresh' }));
+    const c = useFeed.getState().cards[0];
+    expect(c.status).toBe('responded');
+    expect(c.response?.verdict).toBe('approved');
+    expect(c.title).toBe('fresh'); // non-status fields still take the newer row
   });
 
   it('flash opt-in adds then clears flashIds', () => {
@@ -183,5 +193,61 @@ describe('feed store', () => {
         expect(useFeed.getState().events.c1.map((e) => e.seq)).toEqual([1, 2]);
       });
     });
+  });
+});
+
+// --- cards-v2: pure card-status predicates ----------------------------------
+
+const NOW = Date.parse('2026-07-19T12:00:00Z');
+const minsAgo = (m: number) => new Date(NOW - m * 60_000).toISOString();
+const minsAhead = (m: number) => new Date(NOW + m * 60_000).toISOString();
+
+describe('isCardExpired', () => {
+  it('is false when expires_at is null/absent', () => {
+    expect(isCardExpired({ expires_at: null }, NOW)).toBe(false);
+    expect(isCardExpired({}, NOW)).toBe(false);
+  });
+
+  it('is true once expires_at has passed, false before', () => {
+    expect(isCardExpired({ expires_at: minsAgo(1) }, NOW)).toBe(true);
+    expect(isCardExpired({ expires_at: minsAhead(1) }, NOW)).toBe(false);
+  });
+
+  it('handles naive-UTC timestamps (no trailing Z) like timeAgo does', () => {
+    const naive = minsAgo(5).replace('T', ' ').replace(/\.\d+Z$/, ''); // "YYYY-MM-DD HH:MM:SS"
+    expect(isCardExpired({ expires_at: naive }, NOW)).toBe(true);
+  });
+
+  it('is false for an unparseable expires_at (never hide a card on garbage data)', () => {
+    expect(isCardExpired({ expires_at: 'not-a-date' }, NOW)).toBe(false);
+  });
+});
+
+describe('isAgentStale', () => {
+  const base = (extra: Partial<Card>): Card => card('s1', minsAgo(60), { kind: 'approval', ...extra });
+
+  it('is false for non-pending cards, regardless of poll age', () => {
+    expect(isAgentStale(base({ status: 'responded', last_poll_at: minsAgo(30) }), NOW)).toBe(false);
+    expect(isAgentStale(base({ status: 'dismissed', last_poll_at: minsAgo(30) }), NOW)).toBe(false);
+  });
+
+  it('is false for non-actionable kinds without expects_response', () => {
+    expect(isAgentStale(card('n1', minsAgo(60), { kind: 'note', last_poll_at: minsAgo(30) }), NOW)).toBe(false);
+  });
+
+  it('expects_response makes any kind actionable', () => {
+    expect(isAgentStale(card('n1', minsAgo(60), { kind: 'note', expects_response: true, last_poll_at: minsAgo(30) }), NOW)).toBe(true);
+  });
+
+  it('polled recently (<3min): fresh; polled >3min ago: stale', () => {
+    for (const kind of ['approval', 'choice', 'prompt'] as const) {
+      expect(isAgentStale(card('k', minsAgo(60), { kind, last_poll_at: minsAgo(2) }), NOW)).toBe(false);
+      expect(isAgentStale(card('k', minsAgo(60), { kind, last_poll_at: minsAgo(4) }), NOW)).toBe(true);
+    }
+  });
+
+  it('never polled: fresh within 10min of creation, stale after', () => {
+    expect(isAgentStale(card('k', minsAgo(5), { kind: 'prompt', last_poll_at: null }), NOW)).toBe(false);
+    expect(isAgentStale(card('k', minsAgo(11), { kind: 'prompt' }), NOW)).toBe(true);
   });
 });
