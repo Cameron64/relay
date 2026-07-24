@@ -36,6 +36,29 @@ describe('sanitizeForClipboard', () => {
     const clean = sanitizeForClipboard('<table><tr><td>a</td></tr></table>');
     expect(clean).toContain('<td>a</td>');
   });
+
+  it('flattens top-level paragraphs to <br> so line breaks survive a Slack paste', () => {
+    const clean = sanitizeForClipboard('<p>one</p><p>two</p>');
+    expect(clean).not.toContain('<p>'); // top-level <p> wrappers removed
+    expect(clean).toContain('one');
+    expect(clean).toContain('two');
+    expect(clean).toMatch(/<br\s*\/?>/); // separated by explicit break(s)
+    expect(clean).not.toMatch(/<br\s*\/?>\s*$/); // no trailing break after the last paragraph
+  });
+
+  it('preserves lists and nested paragraphs (only top-level <p> are flattened)', () => {
+    const clean = sanitizeForClipboard('<p>intro</p><ul><li>item</li></ul>');
+    expect(clean).toContain('<ul>');
+    expect(clean).toContain('<li>item</li>');
+    expect(clean).toContain('intro');
+  });
+
+  it('keeps inline <br> soft breaks inside a paragraph', () => {
+    const clean = sanitizeForClipboard('<p>a<br>b</p>');
+    expect(clean).toContain('a');
+    expect(clean).toContain('b');
+    expect(clean).toMatch(/a\s*<br\s*\/?>\s*b/);
+  });
 });
 
 describe('timeAgo', () => {
