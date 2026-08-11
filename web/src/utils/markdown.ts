@@ -19,9 +19,52 @@ export function markdownToSafeHtml(md: string): string {
   return DOMPurify.sanitize(raw);
 }
 
-// Sanitize the editor's HTML for the clipboard (rich copy). Small allowlist + href only.
+// Sanitize the editor's HTML for the clipboard (rich copy). Small allowlist + href only, then
+// flatten paragraphs so blank lines survive the paste (see flattenTopLevelParagraphs).
 export function sanitizeForClipboard(html: string): string {
-  return DOMPurify.sanitize(html, { ALLOWED_TAGS: CLIPBOARD_ALLOWED_TAGS, ALLOWED_ATTR: ['href'] });
+  const clean = DOMPurify.sanitize(html, { ALLOWED_TAGS: CLIPBOARD_ALLOWED_TAGS, ALLOWED_ATTR: ['href'] });
+  return flattenTopLevelParagraphs(clean);
+}
+
+// Rich targets prefer the clipboard's text/html flavor, and Slack's paste handler treats a top-level
+// <p> boundary as a SINGLE line break — so the blank line between two paragraphs is lost, and a
+// multi-paragraph draft pastes as consecutive lines. <br> is honored literally everywhere
+// (Slack/Teams/Outlook/Gmail), so replace each top-level <p> with its inline content followed by
+// <br><br>. Nested <p> (inside <li>/<blockquote>/<td>) and every other block — lists, headings,
+// tables, pre — are left untouched.
+//
+// The <br><br> is inserted as a separator BETWEEN top-level nodes, never appended after one, so
+// there is no trailing break and a paragraph FOLLOWING a list still gets its blank line.
+function flattenTopLevelParagraphs(html: string): string {
+  if (typeof document === 'undefined') return html; // non-DOM context (safety) — leave as-is
+  const tpl = document.createElement('template');
+  tpl.innerHTML = html;
+  const root = tpl.content;
+
+  // Top-level nodes, ignoring the whitespace-only text nodes marked() leaves between block tags.
+  const nodes = Array.from(root.childNodes).filter(
+    (n) => !(n.nodeType === Node.TEXT_NODE && !(n.textContent ?? '').trim()),
+  );
+
+  const out = document.createDocumentFragment();
+  let prevWasParagraph = false;
+  nodes.forEach((node, i) => {
+    const isParagraph = node.nodeName === 'P';
+    // One blank line between siblings when either side was a paragraph. Two adjacent real blocks
+    // (e.g. list -> heading) already break themselves, so they get no separator.
+    if (i > 0 && (isParagraph || prevWasParagraph)) {
+      out.append(document.createElement('br'), document.createElement('br'));
+    }
+    if (isParagraph) {
+      while (node.firstChild) out.appendChild(node.firstChild); // unwrap to inline content
+    } else {
+      out.appendChild(node);
+    }
+    prevWasParagraph = isParagraph;
+  });
+
+  root.replaceChildren(out);
+  return tpl.innerHTML;
 }
 
 // "just now" / "5m ago" / "3h ago" / "Jun 14". created_at may be naive UTC (no trailing Z).
