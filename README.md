@@ -2,15 +2,24 @@
 
 ## Personal Compute pilot
 
-The **Compute** drawer submits bounded, synthetic CPU jobs to Cloudripper or the
-current Windows computer. It shows job status, result receipts and cancellation.
-Only the registered non-private test workload is accepted. Image Lab and GPU
-workloads have not migrated.
+The **Compute** drawer has two separate views. It submits bounded, synthetic CPU
+jobs to Cloudripper or the current Windows computer through Prefect. It also
+lists safe metadata for service-owned Image Lab jobs and can request their
+cancellation. Image Lab retains its local queue, resident renderer, private
+prompts, models, and result bytes. Service jobs never enter Prefect or Relay's
+legacy dispatch queue.
 
 Set the server-only `COMPUTE_API_URL` and `COMPUTE_APP_TOKEN` to enable the adapter
 connection. The token is scoped to Relay; it is not a worker or Prefect credential.
 The existing UI session protects `/api/compute/*`. Persisted request IDs make
 submission retries safe when the phone loses the response.
+
+Image Lab service routes expose only allowlisted task, progress, freshness, and
+terminal metadata. They use cursor pagination so older active work remains
+reachable. A cancellation request remains pending until Image Lab reports a
+terminal state. Relay does not proxy image bytes or accept a result URL from the
+cloud record. This source is implemented and tested; consult Personal Compute's
+dated status before claiming the Image Lab path is live.
 
 Prefect owns scheduling, the Personal Compute adapter owns public job identity,
 and a supervisor on each computer owns native process execution. These jobs do
@@ -20,8 +29,10 @@ the computation. Push remains a best-effort notification of that durable card.
 
 Future agents should start with `../personal-compute/AGENTS.md`,
 `../personal-compute/docs/architecture.md`, and
-`../personal-compute/docs/operations.md`. The dated `docs/status.md` in that repo
-distinguishes live verification from startup readiness and pending GPU work.
+`../personal-compute/docs/operations.md`. Use
+`../personal-compute/docs/service-jobs.md` for the Image Lab contract. The dated
+`docs/status.md` in that repo distinguishes live verification from startup
+readiness and pending GPU work.
 
 ## Existing bridge
 
@@ -368,6 +379,9 @@ API with no frontend.
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
 | GET | `/api/health` | — | Railway healthcheck (DB-free) |
+| GET | `/api/compute/service-jobs?cursor=UUID` | UI | paginated safe Image Lab service metadata |
+| GET | `/api/compute/service-jobs/:id` | UI | one safe Image Lab service observation |
+| POST | `/api/compute/service-jobs/:id/cancel` | UI | durably request Image Lab cancellation |
 | GET | `/api/push/public-key` | — | VAPID public key |
 | POST | `/api/push/subscribe` · `/unsubscribe` | — | manage a push subscription |
 | POST | `/api/notify` | write | broadcast a push |
