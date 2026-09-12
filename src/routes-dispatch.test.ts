@@ -1,7 +1,7 @@
 // HTTP-level tests for GET /api/dispatches/next — the runner's long-poll for its next job.
-// Covers the DISPATCH_POLL_HOLD_MS cap (fixes the production 502 cycle: Railway's edge proxy was
-// killing the connection before the old 55s hold ever resolved — see routes-dispatch.ts's header
-// comment on DISPATCH_POLL_HOLD_MS) and the wake-on-new-dispatch path. Run with DB_PATH=:memory:
+// Covers the DISPATCH_POLL_HOLD_MS cap and the wake-on-new-dispatch path. Keep silent poll holds
+// below Bun's configured idleTimeout; an HTTP 502 alone does not identify the closing hop.
+// Run with DB_PATH=:memory:
 // (package.json's test script) — store.ts's single in-memory bun:sqlite connection is shared
 // across every test file in the process, so schema init + __resetForTests() mirror
 // dispatch-store.test.ts's setup.

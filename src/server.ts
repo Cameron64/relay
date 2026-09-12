@@ -4,6 +4,8 @@ import { existsSync } from 'node:fs';
 import { pushRoutes } from './routes-push.ts';
 import { appRoutes } from './routes-cards.ts';
 import { dispatchRoutes } from './routes-dispatch.ts';
+import { computeRoutes } from './routes-compute.ts';
+import { startComputeNotifications } from './compute-notifications.ts';
 import { store } from './store.ts';
 import { ensureCardsSchema, cardsReady, sweepExpired } from './cards-store.ts';
 import { ensureDispatchSchema, dispatchReady, pruneDispatches } from './dispatch-store.ts';
@@ -60,6 +62,8 @@ ensureNotifyLogSchema();
 app.route('/api', pushRoutes); // -> /api/push/*, /api/notify
 app.route('/api', appRoutes); // -> /api/unlock, /api/stream, /api/cards/*
 app.route('/api', dispatchRoutes); // -> /api/dispatches/*, /api/dispatch-targets
+app.route('/api', computeRoutes); // -> /api/compute/*; separate coordinator, never legacy claims
+startComputeNotifications();
 
 // --- expiry sweep -----------------------------------------------------------
 // Cards carry an expires_at (explicit --ttl, or a kind-based default — see cards-store.ts). This

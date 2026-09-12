@@ -36,6 +36,7 @@ export function TopBar({
   onCompose,
   onOpenSessions,
   onOpenActivity,
+  onOpenCompute,
 }: {
   showLock: boolean;
   onLock: () => void;
@@ -47,6 +48,7 @@ export function TopBar({
   // any drawer state owned below the menu would be destroyed mid-open (the drawer flash-close bug).
   onOpenSessions?: () => void;
   onOpenActivity?: (sessionId?: string | null) => void;
+  onOpenCompute?: () => void;
 }) {
   const { setColorScheme } = useMantineColorScheme();
   const computed = useComputedColorScheme('light', { getInitialValueInEffect: true });
@@ -136,6 +138,9 @@ export function TopBar({
               ) : null}
 
               {showLock ? (
+                <Menu.Item onClick={onOpenCompute} disabled={!onOpenCompute}>Compute</Menu.Item>
+              ) : null}
+              {showLock ? (
                 <>
                   <Menu.Divider />
                   <Menu.Item color="red" onClick={onLock}>
@@ -210,6 +215,9 @@ export function TopBar({
           </Tooltip>
         ) : null}
 
+        {showLock ? (
+          <Button variant="subtle" size="xs" color="gray" onClick={onOpenCompute} disabled={!onOpenCompute}>Compute</Button>
+        ) : null}
         {showLock ? (
           <Button variant="subtle" size="xs" color="gray" onClick={onLock} title="Forget this device">
             Lock

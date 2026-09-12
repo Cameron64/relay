@@ -7,6 +7,7 @@ import { Feed } from './components/Feed';
 import { Compose } from './components/Compose';
 import { Activity } from './components/Activity';
 import { SessionsPanel } from './components/SessionsPanel';
+import { ComputePanel } from './components/ComputePanel';
 import { useSSE } from './hooks/useSSE';
 import { useFeed } from './store/feed';
 import { fetchCards, fetchDispatches } from './api';
@@ -16,6 +17,7 @@ type View = 'loading' | 'unlock' | 'feed';
 
 export function App() {
   const [view, setView] = useState<View>('loading');
+  const [computeOpen, setComputeOpen] = useState(false);
   const clear = useFeed((s) => s.clear);
 
   // Compose modal state, lifted here so both TopBar's "+" (fresh dispatch) and a DispatchItem's
@@ -106,6 +108,7 @@ export function App() {
           onCompose={view === 'feed' ? openCompose : undefined}
           onOpenSessions={view === 'feed' ? openSessions : undefined}
           onOpenActivity={view === 'feed' ? openActivity : undefined}
+          onOpenCompute={view === 'feed' ? () => setComputeOpen(true) : undefined}
         />
       </Box>
       <Container size="sm" py="md">
@@ -120,6 +123,7 @@ export function App() {
         )}
       </Container>
       <Compose opened={composeOpen} onClose={() => setComposeOpen(false)} resumeOf={composeResumeOf} lockedTarget={composeLockedTarget} />
+      <ComputePanel opened={computeOpen && view === 'feed'} onClose={() => setComputeOpen(false)} />
       <Activity opened={activityOpen} onClose={() => setActivityOpen(false)} initialSessionId={activitySessionFilter} />
       <SessionsPanel
         opened={sessionsOpen}

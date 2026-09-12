@@ -29,13 +29,9 @@ import { recordNotify, pruneNotifyLog } from './notify-log.ts';
 
 export const dispatchRoutes = new Hono();
 
-// Railway's edge proxy kills a held-open request well before Hono's/Node's own timeouts fire —
-// observed in production as `WARN poll HTTP 502 "Application failed to respond"` on essentially
-// EVERY long-poll once the hold ran ~50s (the old 55s cap below). The edge doesn't wait that long.
-// Cap the hold here, server-side, regardless of what the runner asks for via ?wait=N, so the
-// connection always resolves (200, `{status:'none'}` if nothing queued) safely before the edge's
-// own timeout — 25s default, comfortably under it. Override via env if a given deployment's edge
-// timeout is known to differ.
+// Bound each poll independently of the runner's requested wait. The Bun idleTimeout in
+// server.ts must exceed every silent hold; a 502 alone does not identify an edge-proxy limit.
+// Keep this cap coordinated with that server setting when changing long-poll behavior.
 export const DISPATCH_POLL_HOLD_MS = Number(process.env.DISPATCH_POLL_HOLD_MS ?? 25_000);
 
 // Pure so it's unit-testable without spinning a real 25s timer — see routes-dispatch.test.ts.

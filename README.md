@@ -1,5 +1,30 @@
 # Relay — a Claude Code ⇄ phone / desktop bridge
 
+## Personal Compute pilot
+
+The **Compute** drawer submits bounded, synthetic CPU jobs to Cloudripper or the
+current Windows computer. It shows job status, result receipts and cancellation.
+Only the registered non-private test workload is accepted. Image Lab and GPU
+workloads have not migrated.
+
+Set the server-only `COMPUTE_API_URL` and `COMPUTE_APP_TOKEN` to enable the adapter
+connection. The token is scoped to Relay; it is not a worker or Prefect credential.
+The existing UI session protects `/api/compute/*`. Persisted request IDs make
+submission retries safe when the phone loses the response.
+
+Prefect owns scheduling, the Personal Compute adapter owns public job identity,
+and a supervisor on each computer owns native process execution. These jobs do
+not enter Relay's legacy dispatch queue. Committed results produce one durable
+receipt-to-card mapping in Relay's SQLite database; delivery retries do not rerun
+the computation. Push remains a best-effort notification of that durable card.
+
+Future agents should start with `../personal-compute/AGENTS.md`,
+`../personal-compute/docs/architecture.md`, and
+`../personal-compute/docs/operations.md`. The dated `docs/status.md` in that repo
+distinguishes live verification from startup readiness and pending GPU work.
+
+## Existing bridge
+
 Relay is a small installable PWA + a CLI + Claude Code hooks that bridge two gaps:
 
 1. **Claude Code → your phone.** When a long task finishes or Claude needs input, a Web Push
