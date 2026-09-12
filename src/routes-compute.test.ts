@@ -90,7 +90,7 @@ describe('compute compatibility boundary', () => {
       fetch: async (url, init) => {
         destination = url;
         forwarded = init;
-        return Response.json({ jobs: [{ ...serviceJob, private_prompt: 'do not expose this' }], next_cursor: serviceId });
+        return Response.json({ jobs: [{ ...serviceJob, private_prompt: 'do not expose this', result_url: 'https://evil.example/private' }], next_cursor: serviceId });
       },
     });
     const response = await routes.request('/compute/service-jobs', { headers });
@@ -104,6 +104,31 @@ describe('compute compatibility boundary', () => {
     const payload = await response.json() as any;
     expect(payload).toEqual({ jobs: [serviceJob], next_cursor: serviceId });
     expect(JSON.stringify(payload)).not.toContain('do not expose this');
+    expect(JSON.stringify(payload)).not.toContain('evil.example');
+  });
+
+  test('enables only the fixed local result-link marker for eligible completed Image Lab jobs', async () => {
+    const succeeded = { ...serviceJob, status: 'succeeded', progress: 100, result_ready: true };
+    const routes = createComputeRoutes({
+      config: () => ({
+        url: 'https://compute.example', token: 'test', imageLabResultLinkEnabled: true,
+      }),
+      fetch: async () => Response.json({
+        jobs: [
+          { ...succeeded, result_url: 'https://evil.example/private' },
+          { ...serviceJob, public_id: '33333333-3333-4333-8333-333333333333', result_url: 'javascript:alert(1)' },
+        ],
+        next_cursor: null,
+      }),
+    });
+
+    const response = await routes.request('/compute/service-jobs', { headers });
+    expect(response.status).toBe(200);
+    const payload = await response.json() as any;
+    expect(payload.jobs[0]).toEqual({ ...succeeded, result_link_enabled: true });
+    expect(payload.jobs[1]).toEqual({ ...serviceJob, public_id: '33333333-3333-4333-8333-333333333333' });
+    expect(JSON.stringify(payload)).not.toContain('evil.example');
+    expect(JSON.stringify(payload)).not.toContain('javascript:');
   });
 
   test('validates service job UUIDs locally for reads and cancellation', async () => {

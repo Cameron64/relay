@@ -10,7 +10,7 @@ type ServiceJob = {
   public_id: string; sequence: number; task: { kind: 'image.generate'; version: '1' };
   service: 'image-lab'; host: 'cloudripper'; capability: 'image-cpu'; status: ServiceStatus;
   progress: number | null; result_ready: boolean; owner_observed_at: string; created_at: string; updated_at: string;
-  cancel_requested: boolean; owner_online: boolean; observation_stale: boolean;
+  cancel_requested: boolean; owner_online: boolean; observation_stale: boolean; result_link_enabled?: true;
 };
 const STORAGE_KEY = 'relay-compute-pending-v1';
 const NON_STOPPABLE = new Set(['succeeded', 'failed', 'cancelled', 'awaiting_delivery']);
@@ -223,6 +223,9 @@ export function ComputePanel({ opened, onClose }: { opened: boolean; onClose: ()
       const stale = job.observation_stale || !job.owner_online || job.status === 'unknown';
       const badgeColor = job.status === 'succeeded' ? 'green' : job.status === 'failed' ? 'red' :
         job.status === 'cancelled' ? 'gray' : stale ? 'orange' : 'blue';
+      const resultUrl = job.result_link_enabled === true && job.status === 'succeeded' && job.result_ready && REQUEST_KEY.test(job.public_id)
+        ? `https://lab.internal:8444/?shared_job=${encodeURIComponent(job.public_id)}`
+        : null;
       return <Card key={`image-lab-${job.public_id}`} withBorder padding="sm" style={{ minWidth: 0 }}><Stack gap="xs">
         <Group justify="space-between" wrap="wrap"><Text fw={600}>Image Lab • Cloudripper</Text>
           <Badge color={badgeColor}>{cancellationPending && !SERVICE_TERMINAL.has(job.status)
@@ -238,6 +241,9 @@ export function ComputePanel({ opened, onClose }: { opened: boolean; onClose: ()
             'This status may be stale because Image Lab is not reporting a fresh observation.'}
         </Alert>}
         {job.result_ready && <Text size="sm">Picture ready in private Image Lab.</Text>}
+        {resultUrl && <Button component="a" href={resultUrl} target="_blank" rel="noreferrer" size="xs" variant="light">
+          Open picture in Image Lab
+        </Button>}
         {cancellationPending && !SERVICE_TERMINAL.has(job.status) && <Text size="sm">
           Cancellation requested. Image Lab may continue briefly while it finishes or discards the picture.
         </Text>}

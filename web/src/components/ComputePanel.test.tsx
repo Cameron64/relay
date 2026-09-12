@@ -115,7 +115,7 @@ describe('Image Lab service jobs', () => {
   test('shows result readiness and no cancellation action for terminal jobs', async () => {
     mockedApi.mockImplementation(async path => path.includes('service-jobs') ? Response.json({ jobs: [
       { ...serviceJob, status: 'succeeded', progress: 100, result_ready: true, cancel_requested: true,
-        owner_online: false, observation_stale: true },
+        owner_online: false, observation_stale: true, result_url: 'https://evil.example/private' },
       { ...serviceJob, public_id: '44444444-4444-4444-8444-444444444444', status: 'cancelled', progress: null },
     ], next_cursor: null }) : Response.json({ jobs: [] }));
     mount();
@@ -124,6 +124,32 @@ describe('Image Lab service jobs', () => {
     expect(screen.queryByText(/Image Lab may continue briefly/)).toBeNull();
     expect(screen.queryByText(/This status may be stale/)).toBeNull();
     expect(screen.queryByRole('button', { name: 'Cancel picture' })).toBeNull();
+    expect(screen.queryByRole('link', { name: 'Open picture in Image Lab' })).toBeNull();
+  });
+
+  test('opens only an activated succeeded result at the fixed private Image Lab URL', async () => {
+    mockedApi.mockImplementation(async path => path.includes('service-jobs') ? Response.json({ jobs: [
+      { ...serviceJob, status: 'succeeded', progress: 100, result_ready: true, result_link_enabled: true,
+        result_url: 'https://evil.example/private' },
+    ], next_cursor: null }) : Response.json({ jobs: [] }));
+    mount();
+
+    const link = await screen.findByRole('link', { name: 'Open picture in Image Lab' });
+    expect(link).toHaveAttribute('href', `https://lab.internal:8444/?shared_job=${serviceId}`);
+    expect(link).toHaveAttribute('target', '_blank');
+    expect(link).toHaveAttribute('rel', 'noreferrer');
+    expect(link).not.toHaveAttribute('href', 'https://evil.example/private');
+  });
+
+  test('does not construct a result link from an invalid service identity', async () => {
+    mockedApi.mockImplementation(async path => path.includes('service-jobs') ? Response.json({ jobs: [
+      { ...serviceJob, public_id: 'javascript-alert', status: 'succeeded', progress: 100,
+        result_ready: true, result_link_enabled: true },
+    ], next_cursor: null }) : Response.json({ jobs: [] }));
+    mount();
+
+    await screen.findByText('Picture ready in private Image Lab.');
+    expect(screen.queryByRole('link', { name: 'Open picture in Image Lab' })).toBeNull();
   });
 
   test('keeps the service identity readable at a phone viewport', async () => {

@@ -2,7 +2,7 @@
 import { Hono } from 'hono';
 import { requireUi } from './session.ts';
 
-type ComputeConfig = { url: string; token: string };
+type ComputeConfig = { url: string; token: string; imageLabResultLinkEnabled?: boolean };
 type ComputeOptions = {
   config?: () => ComputeConfig;
   fetch?: (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
@@ -26,6 +26,7 @@ type ServiceJob = {
   cancel_requested: boolean;
   owner_online: boolean;
   observation_stale: boolean;
+  result_link_enabled?: true;
 };
 
 function canonicalTimestamp(value: unknown): string | null {
@@ -34,7 +35,7 @@ function canonicalTimestamp(value: unknown): string | null {
   return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null;
 }
 
-function sanitizeServiceJob(value: any): ServiceJob {
+function sanitizeServiceJob(value: any, imageLabResultLinkEnabled = false): ServiceJob {
   const ownerObservedAt = canonicalTimestamp(value?.owner_observed_at);
   const createdAt = canonicalTimestamp(value?.created_at);
   const updatedAt = canonicalTimestamp(value?.updated_at);
@@ -51,7 +52,7 @@ function sanitizeServiceJob(value: any): ServiceJob {
     typeof value.observation_stale !== 'boolean') {
     throw new Error('invalid service job response');
   }
-  return {
+  const job: ServiceJob = {
     public_id: value.public_id, sequence: value.sequence,
     task: { kind: 'image.generate', version: '1' }, service: 'image-lab',
     host: 'cloudripper', capability: 'image-cpu', status: value.status,
@@ -60,6 +61,13 @@ function sanitizeServiceJob(value: any): ServiceJob {
     cancel_requested: value.cancel_requested, owner_online: value.owner_online,
     observation_stale: value.observation_stale,
   };
+  // Never forward a URL supplied by the coordinator. This local marker lets
+  // the browser construct the one fixed private Image Lab destination after
+  // production activation, and only for a completed result.
+  if (imageLabResultLinkEnabled && job.status === 'succeeded' && job.result_ready) {
+    job.result_link_enabled = true;
+  }
+  return job;
 }
 
 export function createComputeRoutes(options: ComputeOptions = {}) {
@@ -67,6 +75,7 @@ export function createComputeRoutes(options: ComputeOptions = {}) {
   const config = options.config ?? (() => ({
     url: process.env.COMPUTE_API_URL || '',
     token: process.env.COMPUTE_APP_TOKEN || '',
+    imageLabResultLinkEnabled: process.env.IMAGE_LAB_RESULT_LINK_ENABLED === '1',
   }));
   const upstreamFetch = options.fetch ?? globalThis.fetch;
   routes.use('/compute/*', requireUi);
@@ -125,9 +134,12 @@ export function createComputeRoutes(options: ComputeOptions = {}) {
           !(payload.next_cursor === null || (typeof payload.next_cursor === 'string' && UUID.test(payload.next_cursor)))) {
           throw new Error('invalid list');
         }
-        return c.json({ jobs: payload.jobs.map(sanitizeServiceJob), next_cursor: payload.next_cursor }, response.status);
+        return c.json({
+          jobs: payload.jobs.map((job: unknown) => sanitizeServiceJob(job, settings.imageLabResultLinkEnabled === true)),
+          next_cursor: payload.next_cursor,
+        }, response.status);
       }
-      return c.json(sanitizeServiceJob(payload), response.status);
+      return c.json(sanitizeServiceJob(payload, settings.imageLabResultLinkEnabled === true), response.status);
     } catch {
       return c.json({ error: 'Compute service is unavailable.' }, 502);
     }
