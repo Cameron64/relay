@@ -135,7 +135,7 @@ describe('Image Lab service jobs', () => {
     mount();
 
     const link = await screen.findByRole('link', { name: 'Open picture in Image Lab' });
-    expect(link).toHaveAttribute('href', `https://lab.internal:8444/?shared_job=${serviceId}`);
+    expect(link).toHaveAttribute('href', `https://cloudripper.taila29c19.ts.net:8444/?shared_job=${serviceId}`);
     expect(link).toHaveAttribute('target', '_blank');
     expect(link).toHaveAttribute('rel', 'noreferrer');
     expect(link).not.toHaveAttribute('href', 'https://evil.example/private');

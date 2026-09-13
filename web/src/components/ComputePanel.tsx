@@ -224,7 +224,7 @@ export function ComputePanel({ opened, onClose }: { opened: boolean; onClose: ()
       const badgeColor = job.status === 'succeeded' ? 'green' : job.status === 'failed' ? 'red' :
         job.status === 'cancelled' ? 'gray' : stale ? 'orange' : 'blue';
       const resultUrl = job.result_link_enabled === true && job.status === 'succeeded' && job.result_ready && REQUEST_KEY.test(job.public_id)
-        ? `https://lab.internal:8444/?shared_job=${encodeURIComponent(job.public_id)}`
+        ? `https://cloudripper.taila29c19.ts.net:8444/?shared_job=${encodeURIComponent(job.public_id)}`
         : null;
       return <Card key={`image-lab-${job.public_id}`} withBorder padding="sm" style={{ minWidth: 0 }}><Stack gap="xs">
         <Group justify="space-between" wrap="wrap"><Text fw={600}>Image Lab • Cloudripper</Text>
